@@ -1,9 +1,15 @@
 {
+  "description": "Adaptive XOLoop router nudge — fires only when the user prompt matches XOLoop-shaped intent. Silent otherwise to prevent banner-blindness.",
   "hooks": {
     "UserPromptSubmit": [
       {
-        "description": "Adaptive XOLoop router nudge — fires only when user prompt matches XOLoop-shaped intent. Silent otherwise to prevent banner-blindness.",
-        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/classify-intent.cjs\""
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/classify-intent.cjs\"",
+            "timeout": 5
+          }
+        ]
       }
     ]
   }
