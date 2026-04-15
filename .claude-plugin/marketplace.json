@@ -1,0 +1,38 @@
+{
+  "name": "xoloop",
+  "owner": {
+    "name": "XoAnonXo"
+  },
+  "metadata": {
+    "description": "XOLoop — loop-based code improvement framework for Claude Code. 8 modes: build, polish, fuzz, benchmark, improve, audit, autoresearch, overnight.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "xoloop",
+      "description": "Loop-based code improvement — tournament-based polishing, TDD building, property-based fuzzing, Codex+Opus audit loop, Champion-vs-Challenger autoresearch, and overnight orchestration. Works in any Node or Python repo.",
+      "version": "0.1.0",
+      "author": {
+        "name": "XoAnonXo"
+      },
+      "homepage": "https://github.com/XoAnonXo/xoloop",
+      "repository": "https://github.com/XoAnonXo/xoloop",
+      "license": "MIT",
+      "keywords": [
+        "iteration",
+        "tournament",
+        "audit",
+        "fuzz",
+        "tdd",
+        "compound-engineering",
+        "code-improvement",
+        "polish",
+        "benchmark",
+        "autoresearch"
+      ],
+      "category": "development",
+      "source": "./",
+      "strict": false
+    }
+  ]
+}
