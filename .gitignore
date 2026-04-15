@@ -1,0 +1,23 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# XOLoop runtime artifacts (should never be committed even in the plugin repo)
+.xoloop/
+.xoloop-ignore
+
+# Build artifacts
+dist/
+build/
+*.log

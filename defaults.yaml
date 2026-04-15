@@ -1,0 +1,137 @@
+# XOLoop — language-aware bootstrap defaults
+#
+# The plugin's xo-init command consults this file when generating
+# overnight.yaml / objective.yaml for a foreign repo. Order matters:
+# the first matching signal wins.
+#
+# Per Block B.2 locked decision: we SCAN manifests + CI + build files,
+# REJECT interactive / watch / deploy commands, and confirm on low
+# confidence rather than guessing.
+
+signals:
+  - match:
+      files: ["package.json"]
+    language: javascript
+    test_command_candidates:
+      # Inspect package.json:scripts.test and pick the first non-watch one.
+      - from_package_json: "scripts.test"
+      - literal: "npm test"
+    reject_patterns:
+      - "--watch"
+      - "nodemon"
+      - "jest --watchAll"
+      - "mocha --watch"
+      - "vitest(?!\\s+run)"           # plain `vitest` = watch; `vitest run` = ok
+      - "tsc --watch"
+      - "webpack --watch"
+      - "^serve"
+      - "^start"
+      - "deploy"
+      - "publish"
+    source_dirs: ["src", "lib", "app"]
+    test_dirs: ["test", "tests", "__tests__", "spec"]
+
+  - match:
+      files: ["pyproject.toml"]
+    language: python
+    test_command_candidates:
+      - literal: "pytest"
+      - from_pyproject: "tool.pytest.ini_options"
+    reject_patterns:
+      - "--watch"
+      - "pytest-watch"
+    source_dirs: ["src"]
+    test_dirs: ["tests", "test"]
+
+  - match:
+      files: ["setup.py", "requirements.txt"]
+    language: python
+    test_command_candidates:
+      - literal: "pytest"
+      - literal: "python -m unittest"
+    source_dirs: ["src"]
+    test_dirs: ["tests", "test"]
+
+  - match:
+      files: ["Cargo.toml"]
+    language: rust
+    test_command_candidates:
+      - literal: "cargo test"
+    reject_patterns:
+      - "cargo watch"
+    source_dirs: ["src"]
+    test_dirs: ["tests"]
+
+  - match:
+      files: ["go.mod"]
+    language: go
+    test_command_candidates:
+      - literal: "go test ./..."
+    source_dirs: ["."]
+    test_dirs: ["."]
+
+  - match:
+      files: ["Gemfile"]
+    language: ruby
+    test_command_candidates:
+      - literal: "bundle exec rspec"
+      - literal: "rake test"
+    source_dirs: ["lib", "app"]
+    test_dirs: ["spec", "test"]
+
+  - match:
+      files: ["pom.xml"]
+    language: java
+    test_command_candidates:
+      - literal: "mvn test"
+    source_dirs: ["src/main/java"]
+    test_dirs: ["src/test/java"]
+
+  - match:
+      files: ["build.gradle", "build.gradle.kts"]
+    language: java
+    test_command_candidates:
+      - literal: "./gradlew test"
+    source_dirs: ["src/main"]
+    test_dirs: ["src/test"]
+
+  - match:
+      files: ["Makefile"]
+    language: unknown
+    test_command_candidates:
+      # Parse Makefile for a `test:` target; if present use `make test`.
+      - makefile_target: "test"
+      - makefile_target: "check"
+
+# Global rejection patterns — always reject these regardless of language.
+# These are the "real foot-gun" patterns from GPT's Block B.2 pushback.
+global_reject_patterns:
+  - "sudo"
+  - "rm -rf"
+  - "deploy"
+  - "publish"
+  - "release"
+  - "--serve"
+  - "--watch"
+  - "--dev"
+
+# Generic exemplars by language — used by BUILD mode when no in-repo
+# exemplar scores high enough (B.4 locked decision). These ship inside
+# the plugin's exemplars/ directory.
+exemplars:
+  javascript: "exemplars/javascript/module.js"
+  typescript: "exemplars/typescript/module.ts"
+  python: "exemplars/python/module.py"
+  rust: "exemplars/rust/module.rs"
+  go: "exemplars/go/module.go"
+
+# Which modes require full config vs minimal config (B.5 per-mode scaling).
+mode_config_requirements:
+  polish: minimal             # surface path + test command
+  audit: minimal              # surface path
+  fuzz: minimal               # surface path
+  benchmark: medium           # surface path + benchmark definition
+  improve: medium             # surface path + benchmark
+  autoresearch: medium        # surface path + acceptance criteria
+  build: full                 # feature.yaml required
+  overnight: full             # full overnight.yaml + objective.yaml

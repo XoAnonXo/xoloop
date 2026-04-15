@@ -1,0 +1,18 @@
+{
+  "name": "xoloop",
+  "version": "0.1.0",
+  "description": "XOLoop — loop-based code improvement framework for Claude Code. Wraps 8 deterministic modes (build, polish, fuzz, benchmark, improve, audit, autoresearch, overnight) for iterative compound engineering in any repo.",
+  "author": {
+    "name": "xoanonxoLoop"
+  },
+  "homepage": "https://github.com/xoanon/xoloop",
+  "license": "MIT",
+  "keywords": [
+    "iteration",
+    "tournament",
+    "audit",
+    "fuzz",
+    "tdd",
+    "compound-engineering"
+  ]
+}
