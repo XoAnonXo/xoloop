@@ -256,11 +256,16 @@ async function phaseBenchmark(options, runners) {
       const benchmark = YAML.parse(text);
       const caseResults = runners.benchmark(benchmark, { cwd: options.repoRoot });
 
+      // Audit P1: benchmark_runner emits verdict:'PASS' for success and
+      // 'BENCHMARK_VIOLATION' for every failure mode. Earlier the filter
+      // looked for 'BENCHMARK_PASS' — a string the runner never produces —
+      // so every successful case was counted as failed and the pipeline
+      // summary inverted reality. Normalize on the runner's actual verdict.
       const filePassed = Array.isArray(caseResults)
-        ? caseResults.filter((r) => r.verdict === 'BENCHMARK_PASS').length
+        ? caseResults.filter((r) => r && r.verdict === 'PASS').length
         : 0;
       const fileFailed = Array.isArray(caseResults)
-        ? caseResults.filter((r) => r.verdict !== 'BENCHMARK_PASS').length
+        ? caseResults.filter((r) => !r || r.verdict !== 'PASS').length
         : 0;
 
       passed += filePassed;

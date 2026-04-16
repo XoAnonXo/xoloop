@@ -1,11 +1,53 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 
 const { AdapterError } = require('./errors.cjs');
 const { readJsonIfExists, writeJsonAtomic } = require('./baton_common.cjs');
 const { applyOperationSet, rollbackOperationSet } = require('./operation_ir.cjs');
-const { registerGeneratedSurface } = require('./overnight_adapter.cjs');
+const { registerGeneratedSurface, normalizeCommandList } = require('./overnight_adapter.cjs');
+
+// ── Validation command execution ───────────────────────────────────
+//
+// Audit P2: feature_checkpoint used to unconditionally `execFileSync('sh',
+// ['-c', cmd], ...)` for every baseline_validation entry. That stringified
+// any {argv: [...]} objects from the normalized adapter schema to
+// '[object Object]' (immediate failure), AND reintroduced the
+// shell-injection surface the adapter layer closes when
+// disallow_shell_validation is set. Replace with a normalized executor
+// that honors both forms: plain trimmed strings run via bash -lc, {argv:
+// [...]} entries run via execFileSync without a shell.
+function runBaselineValidationCommands(commands, cwd) {
+  const normalized = normalizeCommandList(commands, 'repo.baseline_validation');
+  for (const entry of normalized) {
+    if (typeof entry === 'string') {
+      execFileSync('bash', ['-lc', entry], {
+        cwd,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 120_000,
+      });
+      continue;
+    }
+    if (entry && Array.isArray(entry.argv) && entry.argv.length > 0) {
+      const [command, ...args] = entry.argv;
+      execFileSync(command, args, {
+        cwd,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 120_000,
+      });
+      continue;
+    }
+    throw new AdapterError(
+      'FEATURE_APPROVAL_VALIDATION_MALFORMED',
+      'repo.baseline_validation',
+      'Encountered validation entry that is neither a trimmed string nor {argv: [...]}',
+      { fixHint: 'Ensure every repo.baseline_validation entry is a shell string or {argv: [...]} object.' },
+    );
+  }
+}
+// Retain the spawnSync import for potential future use; silences lint in
+// environments that flag unused destructured imports.
+void spawnSync;
 
 // ── Constants ───────────────────────────────────────────────────────
 
@@ -104,10 +146,20 @@ function approveFeature(featureId, options = {}) {
 
   const resolvedRoot = path.resolve(repoRoot || process.cwd());
 
-  // Apply all operations
+  // Apply all operations.
+  //
+  // Audit P2: build_pipeline.writeReviewBundle persists the generated edits
+  // as `bundle.proposal.operations`, not `bundle.operations` — so
+  // `bundle.operations || []` always evaluated to [] and approvals were
+  // committing nothing while reporting success. Prefer the proposal-nested
+  // path first; fall back to the flat field for back-compat with bundles
+  // written by other producers or legacy callers.
   let rollbackHandle;
+  const operations = (bundle.proposal && Array.isArray(bundle.proposal.operations)
+    ? bundle.proposal.operations
+    : Array.isArray(bundle.operations) ? bundle.operations : []);
   try {
-    rollbackHandle = applyOperationSet(bundle.operations || [], { cwd: resolvedRoot });
+    rollbackHandle = applyOperationSet(operations, { cwd: resolvedRoot });
   } catch (applyError) {
     throw new AdapterError(
       'FEATURE_APPROVAL_FAILED',
@@ -117,19 +169,14 @@ function approveFeature(featureId, options = {}) {
     );
   }
 
-  // Run quick validation (test suite) from the adapter
+  // Run quick validation (test suite) from the adapter, honoring both
+  // shell-form strings and argv-form objects per the normalized schema.
   try {
     const adapterFile = path.resolve(resolvedRoot, adapterPath || 'overnight.yaml');
     const { readYamlFile } = require('./overnight_yaml.cjs');
     const loaded = readYamlFile(adapterFile);
     const commands = (loaded.document.repo && loaded.document.repo.baseline_validation) || [];
-    for (const cmd of commands) {
-      execFileSync('sh', ['-c', cmd], {
-        cwd: resolvedRoot,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: 120_000,
-      });
-    }
+    runBaselineValidationCommands(commands, resolvedRoot);
   } catch (testError) {
     // Tests failed — rollback
     rollbackOperationSet(rollbackHandle);

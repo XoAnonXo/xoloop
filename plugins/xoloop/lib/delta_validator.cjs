@@ -152,22 +152,52 @@ function runValidationInDir(commands, cwd) {
     );
   }
 
-  const normalised = Array.isArray(commands)
-    ? commands.map((c) => String(c || '').trim()).filter(Boolean)
-    : [];
+  // Audit P2: this executor used to stringify every entry with
+  // `String(c || '').trim()` and shell it via `bash -lc`. That collapses
+  // any {argv: [...]} objects from the normalized adapter schema to
+  // '[object Object]' and reintroduces a shell-injection surface that the
+  // adapter layer closes when disallow_shell_validation is set. Preserve
+  // back-compat for plain strings, but honor argv-form entries without
+  // spawning a shell.
+  const entries = Array.isArray(commands) ? commands : [];
+  const normalised = [];
+  for (const entry of entries) {
+    if (typeof entry === 'string') {
+      const trimmed = entry.trim();
+      if (trimmed) normalised.push({ kind: 'shell', command: trimmed });
+      continue;
+    }
+    if (entry && Array.isArray(entry.argv)) {
+      const argv = entry.argv
+        .map((token) => (typeof token === 'string' ? token : String(token || '')).trim())
+        .filter(Boolean);
+      if (argv.length > 0) normalised.push({ kind: 'argv', argv });
+    }
+  }
 
   let firstFailure = null;
 
-  for (const command of normalised) {
-    const result = spawnSync('bash', ['-lc', command], {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      maxBuffer: 10 * 1024 * 1024,
-    });
+  for (const entry of normalised) {
+    let result;
+    if (entry.kind === 'argv') {
+      const [command, ...args] = entry.argv;
+      result = spawnSync(command, args, {
+        cwd,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        maxBuffer: 10 * 1024 * 1024,
+      });
+    } else {
+      result = spawnSync('bash', ['-lc', entry.command], {
+        cwd,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        maxBuffer: 10 * 1024 * 1024,
+      });
+    }
     const exitCode = result.status === null ? 1 : result.status;
     if (exitCode !== 0) {
-      firstFailure = command;
+      firstFailure = entry.kind === 'argv' ? entry.argv.join(' ') : entry.command;
       break;
     }
   }

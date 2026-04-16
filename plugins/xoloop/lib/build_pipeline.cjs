@@ -412,8 +412,15 @@ function writeReviewBundle(outputDir, featureId, result) {
     );
   }
   try {
-    ensureDir(outputDir);
-    const bundlePath = path.join(outputDir, `${featureId}-review-bundle.json`);
+    // Audit P2: feature_checkpoint.bundlePath reads from
+    //   <reportsDir>/<featureId>/review-bundle.json
+    // but writeReviewBundle used to write to
+    //   <outputDir>/<featureId>-review-bundle.json (flat)
+    // so every BUILD proposal became unreachable through the approval flow.
+    // Write into the nested layout the checkpoint already consumes.
+    const featureDir = path.join(outputDir, featureId);
+    ensureDir(featureDir);
+    const bundlePath = path.join(featureDir, 'review-bundle.json');
     const bundle = {
       featureId,
       status: result.status || null,

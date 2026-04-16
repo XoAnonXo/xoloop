@@ -664,6 +664,7 @@ module.exports = {
   loadOvernightAdapter,
   matchesPathPattern,
   normalizeAdapterDocument,
+  normalizeCommandList,
   registerGeneratedSurface,
   resolvePatternMatches,
 };
