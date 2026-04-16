@@ -56,6 +56,13 @@ function resolveBenchmarkPath(repoRoot, benchmarkResult) {
       else if ((entry.passed || 0) > 0) passing.push(entry.file);
     }
   }
+  // Audit P3 (round 12): when multiple benchmarks failed, we picked
+  // the first entry from `benchmarkResult.results`, whose order is
+  // determined by fs.readdirSync traversal — platform-specific and
+  // historically unstable. Sort for reproducible picks so two runs
+  // on the same repo target the same benchmark when nothing changed.
+  failed.sort();
+  passing.sort();
   const candidates = failed.length > 0 ? failed : passing;
   if (candidates.length === 0) {
     const { spawnSync } = require('node:child_process');
@@ -65,11 +72,21 @@ function resolveBenchmarkPath(repoRoot, benchmarkResult) {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     if (tracked.status === 0) {
+      // Audit low (round 10): previous fallback dropped directory
+      // components via `path.basename()`, so a file like
+      // `benchmarks/perf/latency.yaml` collapsed to `latency.yaml`
+      // and the subsequent path.join produced `benchmarks/latency.yaml`
+      // — a different file. Preserve the repo-relative path returned
+      // by git ls-files and strip only the leading `benchmarks/` so
+      // path.join below re-prefixes exactly once.
       const lines = String(tracked.stdout || '')
         .split('\n')
         .map((line) => line.trim())
-        .filter((line) => line.endsWith('.yaml') || line.endsWith('.yml'));
-      candidates.push(...lines.map((line) => path.basename(line)));
+        .filter((line) => line.endsWith('.yaml') || line.endsWith('.yml'))
+        .map((line) => line.replace(/\\/g, '/'))
+        .filter((line) => line.startsWith('benchmarks/'))
+        .map((line) => line.slice('benchmarks/'.length));
+      candidates.push(...lines);
     }
   }
   if (candidates.length === 0) return undefined;
@@ -104,6 +121,7 @@ function parseXoCommand(argv) {
     codexReasoning: DEFAULT_CODEX_REASONING,
     allowBenchmarkExec: false,
     allowDirectiveExec: false,
+    allowFuzzExec: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -164,6 +182,11 @@ function parseXoCommand(argv) {
       // BUILD directive execution explicitly, and the default stays
       // safe against committed-but-unexamined approved directives.
       result.allowDirectiveExec = true;
+    } else if (arg === '--allow-fuzz-exec') {
+      // Audit P1 (round 9): completes the opt-in trio. Fuzz, benchmark,
+      // and directives all require explicit consent before they
+      // auto-require / auto-execute committed files.
+      result.allowFuzzExec = true;
     }
   }
 
@@ -212,6 +235,7 @@ function getDefaultRunners() {
  * Phase 1: BUILD — check for approved directives, run them if present.
  */
 async function phaseBuild(options, runners) {
+  const fs = require('node:fs');
   const directiveRunner = runners.directive;
   let directives;
   let api;
@@ -230,7 +254,13 @@ async function phaseBuild(options, runners) {
   // lands auto-exec. Gate this phase on an explicit opt-in flag — same
   // pattern as benchmark execution — so a committed-but-unexamined
   // directive cannot slip through on the next XO run.
-  if (options.allowDirectiveExec !== true) {
+  //
+  // Audit P3 (round 10): exempt dry-run from the opt-in gate. Dry-run
+  // never executes anything — it just reports what WOULD happen — so
+  // blocking it behind --allow-directive-exec defeats the preview UX.
+  // Operators should be able to run `xo --dry-run` with zero flags to
+  // see a plan, then add the opt-in only when they want the real run.
+  if (options.allowDirectiveExec !== true && options.dryRun !== true) {
     return {
       skipped: true,
       reason: 'directive execution requires explicit opt-in (pass options.allowDirectiveExec=true or --allow-directive-exec); refused by default so committed `.xoanon/directives/approved/*` files cannot auto-exec',
@@ -244,6 +274,51 @@ async function phaseBuild(options, runners) {
   } else {
     return { skipped: true, reason: 'no directive runner', directives: 0 };
   }
+
+  // Audit P1 (round 13): BUILD used to trust every path returned by
+  // listApprovedDirectives() verbatim — a symlinked entry in
+  // `.xoanon/directives/approved/` or a malformed directive object
+  // with a `path` pointing outside the queue could route execution
+  // through an arbitrary file. Constrain to paths whose resolved
+  // realpath lives strictly inside the approved directory, and
+  // refuse symlinks via lstat. Anything else gets logged in the
+  // returned result as a refused entry so operators see the
+  // rejection instead of it happening silently.
+  const approvedDirAbs = (() => {
+    try { return fs.realpathSync(path.join(directivesBaseDir, 'approved')); }
+    catch (_e) { return path.resolve(directivesBaseDir, 'approved'); }
+  })();
+  const refusedDirectives = [];
+  directives = (Array.isArray(directives) ? directives : []).filter((d) => {
+    if (!d || typeof d.path !== 'string' || d.path.length === 0) {
+      refusedDirectives.push({ path: d && d.path, reason: 'directive entry has no path string' });
+      return false;
+    }
+    let lstat;
+    try {
+      lstat = fs.lstatSync(d.path);
+    } catch (_lstatErr) {
+      refusedDirectives.push({ path: d.path, reason: 'directive file does not exist' });
+      return false;
+    }
+    if (lstat.isSymbolicLink()) {
+      refusedDirectives.push({ path: d.path, reason: 'directive file is a symlink — refused' });
+      return false;
+    }
+    let realResolved;
+    try {
+      realResolved = fs.realpathSync(d.path);
+    } catch (_realErr) {
+      refusedDirectives.push({ path: d.path, reason: 'directive realpath could not be resolved' });
+      return false;
+    }
+    const rel = path.relative(approvedDirAbs, realResolved);
+    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+      refusedDirectives.push({ path: d.path, reason: `directive resolves outside approved directory (rel=${rel})` });
+      return false;
+    }
+    return true;
+  });
 
   if (!Array.isArray(directives) || directives.length === 0) {
     return { skipped: true, reason: 'no approved directives', directives: 0 };
@@ -321,6 +396,21 @@ async function phaseBuild(options, runners) {
       const PENDING_STATUSES = new Set([
         'awaiting_approval', 'pending', 'in_progress', 'needs_review', 'queued',
       ]);
+      // Audit P1 (round 10): earlier rounds locked success detection to
+      // build-pipeline-specific statuses, but BUILD directives can be
+      // routed to polish/improve/fuzz actions whose native result shapes
+      // don't use those strings at all. runPolishLoop returns
+      // `{ rounds, landed, failed, testsAdded, saturated, recommendation }`
+      // with no `status` field — my allowlist silently marked those as
+      // non-success and archived them as failed. Broaden: when the
+      // result has no error/ok:false/status, treat it as success (the
+      // traditional "non-throwing return" convention), while retaining
+      // explicit PENDING/FAIL signals when present.
+      const hasAnyFailureSignal = !!(
+        (result && result.error)
+        || (result && result.ok === false)
+        || (result && typeof result.status === 'string' && !SUCCESS_STATUSES.has(result.status) && !PENDING_STATUSES.has(result.status))
+      );
       if (result === null || result === undefined) {
         // Runners that return nothing are treated as success (legacy
         // contract — tests rely on `runners.build` mock returning void).
@@ -336,6 +426,29 @@ async function phaseBuild(options, runners) {
         // by hand or via the next phase that owns that state.
         ok = false;
         pendingExternalAction = true;
+      } else if (!hasAnyFailureSignal) {
+        // Round-10 broadening: no failure signal of any kind → success.
+        // Covers polish/improve-style directives that return metrics
+        // objects without a `status` field.
+        //
+        // Audit P3 (round 13): the round-10 broadening was too lenient
+        // — a runner refactor that accidentally returned `{}` (empty
+        // object, no status/ok/error) got archived as successful.
+        // Require at least ONE positive signal beyond "no failure":
+        //   - explicit ok:true (covered above)
+        //   - success-status string (covered above)
+        //   - a recognized "work happened" shape: rounds/landed/
+        //     improvements/testsAdded > 0 OR non-empty results array
+        // Unknown-shape returns stay as ok:false so the operator sees
+        // the directive as failed rather than silently archived.
+        const hasPositiveSignal = !!(
+          (typeof result.rounds === 'number' && result.rounds > 0)
+          || (typeof result.landed === 'number' && result.landed > 0)
+          || (typeof result.improvements === 'number' && result.improvements > 0)
+          || (typeof result.testsAdded === 'number' && result.testsAdded > 0)
+          || (Array.isArray(result.results) && result.results.length > 0)
+        );
+        ok = hasPositiveSignal;
       } else {
         ok = false;
       }
@@ -452,6 +565,7 @@ async function phaseBuild(options, runners) {
 
     let completionError = null;
     let keptInApproved = false;
+    let completionSidecarWritten = false;
     // Audit P1 (round 8): archive only on success or permanent failure.
     // Retryable failures stay in approved/ (as before), AND pending
     // external-action states (awaiting_approval, in_progress, etc.)
@@ -469,23 +583,81 @@ async function phaseBuild(options, runners) {
         completionError = completionErr && completionErr.message
           ? completionErr.message
           : String(completionErr);
+        // Audit P1+P2 (round 14): the round-13 sidecar fix had two
+        // problems. (1) It wrote to `${d.path}.completed`, and if a
+        // hostile branch slipped a directive whose path pointed
+        // outside the approved dir past the realpath check (e.g.
+        // via a TOCTOU race), the sidecar write would land in an
+        // arbitrary location — an arbitrary-file-write primitive
+        // piggybacking on a legitimate completion flow. (2) Nothing
+        // ever READ the sidecar, so a successful directive whose
+        // archive failed still replayed on the next XO run.
+        //
+        // Replace the sidecar with a direct unlink of the directive
+        // file, scoped strictly to the already-realpath-verified
+        // approved/ directory. Unlinking is:
+        //   - atomic (no partial-state file)
+        //   - within the verified directory (no arbitrary-write)
+        //   - self-documenting (listApprovedDirectives won't see it)
+        // The trade-off vs archive: no history record survives. That
+        // is strictly better than infinite replay AND better than a
+        // sidecar that opens an arbitrary-write surface.
+        if (ok) {
+          try {
+            const realOfPath = fs.realpathSync(d.path);
+            const relInside = path.relative(approvedDirAbs, realOfPath);
+            if (relInside !== '' && !relInside.startsWith('..') && !path.isAbsolute(relInside)) {
+              fs.unlinkSync(realOfPath);
+              completionSidecarWritten = true;  // field name preserved for result shape
+            }
+          } catch (_unlinkErr) { /* best-effort; completionError already recorded */ }
+        }
       }
     } else if (canComplete) {
       keptInApproved = true;
     }
+    // Audit P3 (round 11): when the runner returned a structured
+    // `{ ok:false, error:{ message, code, retryable, status } }`, the
+    // earlier code collapsed it to `error: errorMsg` (a bare string)
+    // on the result entry. Downstream report code saw "network timeout"
+    // with no way to show the code/retryable/status context. Keep the
+    // string for backward-compat display but also surface the full
+    // structured error as `errorDetails` so formatters and automation
+    // can render code/status/retryable distinctly.
+    const errorDetails = (result && typeof result.error === 'object' && result.error !== null)
+      ? {
+        message: typeof result.error.message === 'string' ? result.error.message : errorMsg,
+        code: result.error.code || null,
+        status: typeof result.error.status === 'number' ? result.error.status : null,
+        retryable: result.error.retryable === true,
+      }
+      : (errorMsg ? { message: errorMsg, code: null, status: null, retryable: looksRetryable } : null);
     results.push({
       path: d.path,
       ok,
       result,
       error: errorMsg,
+      errorDetails,
       completionError,
+      completionSidecarWritten,
       retryable: looksRetryable,
       keptInApproved,
       pendingExternalAction,
     });
   }
 
-  return { skipped: false, directives: directives.length, results };
+  // Audit low (round 14): refusedDirectives was collected during path
+  // validation but never surfaced in the phase result, so operators
+  // had no way to see which entries were rejected (symlinks, out-of-
+  // approved-dir paths, missing files). Thread it through so the
+  // summary and formatXoReport can render refused entries alongside
+  // failed/succeeded ones.
+  return {
+    skipped: false,
+    directives: directives.length,
+    results,
+    refusedDirectives,
+  };
 }
 
 /**
@@ -518,11 +690,80 @@ async function phaseFuzz(options, runners) {
   const libDir = path.join(options.repoRoot, 'proving-ground', 'lib');
   let moduleFiles = [];
 
+  // Audit P2 (round 13): clear Node's require cache entries for every
+  // module we're about to fuzz. BUILD/POLISH earlier in the pipeline
+  // may have modified these files; if fuzz_engine.fuzzModule() just
+  // re-requires the same path, Node returns the cached (pre-change)
+  // version and fuzz is measuring stale code. Evict entries from the
+  // cache whose resolved filename lives under libDir so the fuzz
+  // phase sees the current-disk version of every module.
   try {
-    const entries = fs.readdirSync(libDir);
-    moduleFiles = entries.filter((f) => f.endsWith('.cjs') || f.endsWith('.js'));
+    const libAbs = fs.realpathSync(libDir);
+    for (const key of Object.keys(require.cache)) {
+      if (key.startsWith(libAbs)) delete require.cache[key];
+    }
+  } catch (_cacheErr) { /* non-fatal — best-effort isolation */ }
+
+  // Audit P2 (round 11): previous discovery used readdirSync on the top
+  // level only. Nested modules under `proving-ground/lib/` (e.g.
+  // `proving-ground/lib/polish/strategies.cjs`) were silently skipped
+  // so operators organizing their framework into subpackages never
+  // saw fuzz coverage. Walk recursively; keep the tracked+lstat gate
+  // for security. moduleFiles is a list of repo-relative-from-libDir
+  // paths to preserve subdirectory information.
+  // Audit P2 (round 12): walk returns [] for ALL readdirSync failures,
+  // including a missing top-level libDir. Callers used to see
+  // `skipped: true, reason: 'lib directory not found'` for that case;
+  // after the recursive rewrite they saw `skipped: false, totalModules: 0`
+  // and thought the phase ran cleanly. Preserve the original missing-
+  // directory signal: if the TOP-level readdir fails, surface skipped.
+  // Nested readdir failures (per-subdir) still degrade gracefully to
+  // "skip this subdir, keep walking siblings."
+  function walkLibDir(absDir, relDir, isRoot) {
+    const out = [];
+    let entries;
+    try {
+      entries = fs.readdirSync(absDir, { withFileTypes: true });
+    } catch (walkErr) {
+      if (isRoot) throw walkErr;
+      return out;
+    }
+    for (const entry of entries) {
+      const childRel = relDir ? `${relDir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        out.push(...walkLibDir(path.join(absDir, entry.name), childRel, false));
+        continue;
+      }
+      if (entry.isFile() && (entry.name.endsWith('.cjs') || entry.name.endsWith('.js'))) {
+        out.push(childRel);
+      }
+    }
+    return out;
+  }
+
+  try {
+    moduleFiles = walkLibDir(libDir, '', true);
   } catch (_err) {
     return { skipped: true, reason: 'lib directory not found', crashes: [], totalModules: 0 };
+  }
+
+  // Audit P1 (round 9): make fuzz execution opt-in by default, matching
+  // the gates benchmark and directive phases already enforce. Previous
+  // rounds landed a git-tracked + non-symlink + direct-child gate that
+  // blocked untracked drops, but running XO on a hostile branch still
+  // auto-required every tracked `.cjs` in proving-ground/lib and gave
+  // that branch code execution on the operator's machine. Require
+  // `options.allowFuzzExec === true` so opt-in is explicit across all
+  // three auto-exec phases; the git-tracked subsequent gate stays in
+  // place as defense-in-depth for opted-in users.
+  if (options.allowFuzzExec !== true) {
+    return {
+      skipped: true,
+      reason: 'fuzz auto-execution requires explicit opt-in (pass options.allowFuzzExec=true or --allow-fuzz-exec); refused by default because fuzz `require()`s every matching module and a hostile branch\'s tracked .cjs files would run their module-init code on the operator\'s machine',
+      crashes: [],
+      totalModules: 0,
+      availableModules: moduleFiles.length,
+    };
   }
 
   // Audit P1 (round 6): FUZZ auto-discovers every `.cjs`/`.js` under
@@ -532,22 +773,7 @@ async function phaseFuzz(options, runners) {
   // module-init code executed in the fuzz process. Restrict auto-
   // discovery to files tracked in git (same gate the benchmark phase
   // now enforces) so an untracked scratch module or rogue-commit file
-  // cannot RCE the fuzzer on the operator's machine.
-  //
-  // Audit P1 (round 7): git-tracked only gates against *untracked*
-  // attacker drops; it does NOT protect against a tracked file that
-  // was ALTERED on the currently-checked-out branch. If an operator
-  // pulls a hostile PR branch and runs XO, fuzz will happily require
-  // any tracked `.cjs` — including one the attacker replaced with an
-  // RCE payload. This is fundamentally the trust boundary of a code-
-  // analysis tool that runs the code it analyzes, and closing it
-  // further would require signed manifests or a pre-committed SHA-256
-  // allowlist — either of which breaks day-to-day development. The
-  // documented and accepted trust model is: DO NOT run the XO
-  // pipeline on a branch you would not be willing to `require()`
-  // every file from. The git-tracked gate still eliminates the
-  // most common mistake (untracked scratch files); it is not meant
-  // to defend against hostile branches.
+  // cannot RCE the fuzzer even after opt-in.
   if (moduleFiles.length > 0) {
     const { spawnSync } = require('node:child_process');
     const repoCheck = spawnSync('git', ['ls-files', '--error-unmatch', '--', 'proving-ground/lib'], {
@@ -568,20 +794,21 @@ async function phaseFuzz(options, runners) {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    const trackedTopLevelLib = new Set(
+    // Audit P2 (round 11): matched benchmark fix — compare full
+    // repo-relative paths so nested modules survive the tracked gate
+    // while basename-collision attacks stay blocked. We still reject
+    // symlinks via lstat.
+    const trackedLibFiles = new Set(
       String(trackedOutput.stdout || '')
         .split('\n')
         .map((line) => line.trim())
         .filter(Boolean)
-        .filter((p) => {
-          const normalized = p.replace(/\\/g, '/');
-          if (!normalized.startsWith('proving-ground/lib/')) return false;
-          return normalized.slice('proving-ground/lib/'.length).indexOf('/') === -1;
-        })
-        .map((p) => path.basename(p)),
+        .map((p) => p.replace(/\\/g, '/'))
+        .filter((p) => p.startsWith('proving-ground/lib/'))
+        .map((p) => p.slice('proving-ground/lib/'.length)),
     );
     moduleFiles = moduleFiles.filter((f) => {
-      if (!trackedTopLevelLib.has(f)) return false;
+      if (!trackedLibFiles.has(f)) return false;
       try {
         const st = fs.lstatSync(path.join(libDir, f));
         if (st.isSymbolicLink()) return false;
@@ -644,9 +871,39 @@ async function phaseBenchmark(options, runners) {
   const benchDir = path.join(options.repoRoot, 'benchmarks');
   let benchFiles = [];
 
+  // Audit P2 (round 11): the previous discovery used a single
+  // readdirSync() and only matched direct children of `benchmarks/`.
+  // Legitimately nested files like `benchmarks/perf/latency.yaml`
+  // were silently excluded even when tracked in git. Walk the
+  // benchmarks/ tree recursively so nested organization is honored.
+  // benchFiles is a list of repo-relative-from-benchmarks paths.
+  // Audit P2 (round 12): same top-level-vs-nested distinction as the
+  // fuzz walk. A missing `benchmarks/` directory must surface as
+  // skipped, not as a 0-passed/0-failed "successful empty run."
+  function walkBenchmarkDir(absDir, relDir, isRoot) {
+    const out = [];
+    let entries;
+    try {
+      entries = fs.readdirSync(absDir, { withFileTypes: true });
+    } catch (walkErr) {
+      if (isRoot) throw walkErr;
+      return out;
+    }
+    for (const entry of entries) {
+      const childRel = relDir ? `${relDir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        out.push(...walkBenchmarkDir(path.join(absDir, entry.name), childRel, false));
+        continue;
+      }
+      if (entry.isFile() && (entry.name.endsWith('.yaml') || entry.name.endsWith('.yml'))) {
+        out.push(childRel);
+      }
+    }
+    return out;
+  }
+
   try {
-    const entries = fs.readdirSync(benchDir);
-    benchFiles = entries.filter((f) => f.endsWith('.yaml') || f.endsWith('.yml'));
+    benchFiles = walkBenchmarkDir(benchDir, '', true);
   } catch (_err) {
     return { skipped: true, reason: 'benchmarks directory not found', passed: 0, failed: 0, results: [] };
   }
@@ -707,19 +964,22 @@ async function phaseBenchmark(options, runners) {
     // a rename — could piggy-back on the legit tracked entry. Compare
     // full repo-relative paths instead, and restrict auto-discovery to
     // files directly under `benchmarks/` (no subdirectory traversal).
-    const trackedTopLevelBenchmarks = new Set(
+    // Audit P2 (round 11): earlier rounds restricted discovery to
+    // direct children of `benchmarks/`. That closed a basename-
+    // collision ambiguity but also silently excluded every legitimately
+    // nested benchmark file (e.g. `benchmarks/perf/latency.yaml`).
+    // Now that we compare full repo-relative paths (no basename
+    // collapsing), subdirectory organization is safe. Also extend
+    // auto-discovery to walk the benchmarks/ tree recursively so
+    // nested files are seen by the phase at all.
+    const trackedRelativeBenchmarks = new Set(
       String(trackedList.stdout || '')
         .split('\n')
         .map((line) => line.trim())
         .filter(Boolean)
-        // Only keep entries that are direct children of `benchmarks/`,
-        // i.e. no further path separator in the rest.
-        .filter((p) => {
-          const normalized = p.replace(/\\/g, '/');
-          if (!normalized.startsWith('benchmarks/')) return false;
-          return normalized.slice('benchmarks/'.length).indexOf('/') === -1;
-        })
-        .map((p) => path.basename(p)),
+        .map((p) => p.replace(/\\/g, '/'))
+        .filter((p) => p.startsWith('benchmarks/'))
+        .map((p) => p.slice('benchmarks/'.length)),
     );
     // Audit P2 (round 5): git-tracked symlinks can be committed and still
     // point outside the repo (or to privileged files). A committed
@@ -730,7 +990,7 @@ async function phaseBenchmark(options, runners) {
     // symbolic link; operators can commit real YAML files or opt out.
     const symlinkBlocked = [];
     const trackedFilteredByLstat = benchFiles.filter((f) => {
-      if (!trackedTopLevelBenchmarks.has(f)) return false;
+      if (!trackedRelativeBenchmarks.has(f)) return false;
       try {
         const st = fs.lstatSync(path.join(benchDir, f));
         if (st.isSymbolicLink()) {
@@ -744,7 +1004,7 @@ async function phaseBenchmark(options, runners) {
       }
       return true;
     });
-    const untracked = benchFiles.filter((f) => !trackedTopLevelBenchmarks.has(f));
+    const untracked = benchFiles.filter((f) => !trackedRelativeBenchmarks.has(f));
     benchFiles = trackedFilteredByLstat;
     if (symlinkBlocked.length > 0) {
       results.push(...symlinkBlocked.map((file) => ({
@@ -810,8 +1070,22 @@ async function phaseImprove(options, runners, benchmarkResult) {
     return { skipped: false, dryRun: true, improvements: 0, accepted: 0, agents: ['opus', 'sonnet'] };
   }
 
-  // Only run improve if there were benchmark failures or results present
-  const hasRoom = benchmarkResult && (benchmarkResult.failed > 0 || benchmarkResult.passed > 0);
+  // Audit P2 (round 10): `benchmarkResult.failed` is ambiguous — it's a
+  // NUMERIC failure count when phaseBenchmark completes normally, but
+  // my round-9 runPhaseSafely fix also sets `failed: true` (boolean)
+  // when the benchmark phase itself throws. `true > 0` coerces to
+  // `true`, so a thrown benchmark would tell improve to run anyway
+  // (against non-existent results). Use the numeric `failedCount`
+  // field when present (runPhaseSafely preserves the count there)
+  // and fall back to a type-checked `failed` so legacy callers aren't
+  // broken.
+  const benchmarkFailCount = (benchmarkResult && typeof benchmarkResult.failedCount === 'number')
+    ? benchmarkResult.failedCount
+    : (benchmarkResult && typeof benchmarkResult.failed === 'number' ? benchmarkResult.failed : 0);
+  const benchmarkPassCount = (benchmarkResult && typeof benchmarkResult.passed === 'number')
+    ? benchmarkResult.passed
+    : 0;
+  const hasRoom = benchmarkResult && (benchmarkFailCount > 0 || benchmarkPassCount > 0);
   if (!hasRoom) {
     return { skipped: true, reason: 'no benchmarks to improve against', improvements: 0, accepted: 0 };
   }
@@ -926,12 +1200,17 @@ function buildXoSummary(phaseResults) {
   const polishRounds = (polishResult.rounds || 0) + (finalPolishResult.rounds || 0);
   const totalTests = (polishResult.testsAdded || 0) + (finalPolishResult.testsAdded || 0);
   const totalCrashes = Array.isArray(fuzzResult.crashes) ? fuzzResult.crashes.length : 0;
-  const benchmarksPassed = benchmarkResult.passed || 0;
-  // Audit P2 (round 8): summary only tracked benchmarksPassed, so a run
-  // where all benchmarks failed looked identical to a run that skipped
-  // benchmarks entirely. Track failures alongside passes so the report
-  // can surface "5 passed / 3 failed" instead of hiding the regression.
-  const benchmarksFailed = benchmarkResult.failed || 0;
+  // Audit P2 (round 11): `benchmarkResult.failed` is ambiguous after the
+  // round-9 runPhaseSafely change — it's a numeric count on a normal
+  // completion but `true` (boolean) when the benchmark phase itself
+  // threw. `benchmarkResult.failed || 0` coerces `true` to itself, so
+  // the summary surfaced `benchmarksFailed: true`. Use `failedCount`
+  // when runPhaseSafely preserved it, else read `failed` only when it
+  // is genuinely numeric.
+  const benchmarksPassed = typeof benchmarkResult.passed === 'number' ? benchmarkResult.passed : 0;
+  const benchmarksFailed = typeof benchmarkResult.failedCount === 'number'
+    ? benchmarkResult.failedCount
+    : (typeof benchmarkResult.failed === 'number' ? benchmarkResult.failed : 0);
   const improvementsAccepted = improveResult.accepted || improveResult.improvements || 0;
 
   // Detect diminishing returns: polish saturated or improve saturated
@@ -962,7 +1241,14 @@ function buildXoSummary(phaseResults) {
     // directives failed even when the overall phase didn't abort.
     if (phaseName === 'build' && Array.isArray(phaseResult.results)) {
       for (const directiveResult of phaseResult.results) {
-        if (directiveResult && directiveResult.ok === false) {
+        // Audit P2 (round 9): round-6's check flagged every ok:false
+        // as a failure, but ok:false also covers the pending-external-
+        // action states (awaiting_approval, in_progress, queued) that
+        // round-8 added. Reporting those as failures inverted their
+        // meaning — "waiting for reviewer" appeared as "failed."
+        // Skip pending states; they're recorded on the directive
+        // entry's pendingExternalAction flag, not a summary failure.
+        if (directiveResult && directiveResult.ok === false && !directiveResult.pendingExternalAction) {
           phaseFailures.push({
             phase: 'build',
             directive: directiveResult.path || '<unknown>',
@@ -1141,9 +1427,76 @@ async function runXoPipeline(options) {
   }
 
   const resolvedRoot = path.resolve(options.repoRoot);
-  const activePhases = Array.isArray(options.phases) && options.phases.length > 0
-    ? options.phases
+  // Audit P3 (round 14): parseXoCommand validates numeric CLI inputs
+  // (--max-polish-rounds, --fuzz-runs) but programmatic callers can
+  // pass raw objects to runXoPipeline with maxPolishRounds: -1,
+  // fuzzRuns: 'abc', dryRun: 'yes' — garbage values that flowed
+  // straight through to the phase runners and exploded deep in the
+  // call stack. Sanitize each numeric/boolean field at the entry
+  // point; invalid values fall back to the documented defaults.
+  const optionWarnings = [];
+  function sanitizePositiveInt(name, value, fallback) {
+    if (value === undefined) return fallback;
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || !Number.isInteger(value)) {
+      optionWarnings.push({
+        kind: 'invalid-option',
+        field: name,
+        received: String(value),
+        hint: `${name} must be a positive integer; using default ${fallback}`,
+      });
+      return fallback;
+    }
+    return value;
+  }
+  function sanitizeBool(name, value) {
+    if (value === undefined) return false;
+    if (typeof value !== 'boolean') {
+      optionWarnings.push({
+        kind: 'invalid-option',
+        field: name,
+        received: String(value),
+        hint: `${name} must be a boolean; coerced to ${value === true}`,
+      });
+      return value === true;
+    }
+    return value;
+  }
+  const sanitizedMaxPolishRounds = sanitizePositiveInt('maxPolishRounds', options.maxPolishRounds, DEFAULT_MAX_POLISH_ROUNDS);
+  const sanitizedFuzzRuns = sanitizePositiveInt('fuzzRuns', options.fuzzRuns, DEFAULT_FUZZ_RUNS);
+  const sanitizedDryRun = sanitizeBool('dryRun', options.dryRun);
+  const sanitizedAllowBenchmark = sanitizeBool('allowBenchmarkExec', options.allowBenchmarkExec);
+  const sanitizedAllowDirective = sanitizeBool('allowDirectiveExec', options.allowDirectiveExec);
+  const sanitizedAllowFuzz = sanitizeBool('allowFuzzExec', options.allowFuzzExec);
+  // Audit P3 (round 9): parseXoCommand validates --phases CLI input,
+  // but runXoPipeline accepted options.phases verbatim. Programmatic
+  // callers passing ['buidl', 'polish'] silently disabled BUILD with
+  // no warning. Validate at the entry point too; unknown names go to
+  // programmaticWarnings[] so the top-level result surfaces them.
+  const rawPhases = Array.isArray(options.phases) && options.phases.length > 0
+    ? options.phases.filter((p) => typeof p === 'string' && p.length > 0)
     : ALL_PHASES.slice();
+  const knownPhaseSet = new Set(ALL_PHASES);
+  const filteredKnownPhases = rawPhases.filter((p) => knownPhaseSet.has(p));
+  const unknownPhases = rawPhases.filter((p) => !knownPhaseSet.has(p));
+  const programmaticWarnings = unknownPhases.map((name) => ({
+    kind: 'unknown-phase',
+    requested: name,
+    hint: `options.phases received "${name}"; known phases are ${ALL_PHASES.join(', ')}`,
+  }));
+  // Audit P2 (round 12): round-9's "fall back to ALL_PHASES if empty
+  // after filtering" rescued accidental empties but ALSO fell open
+  // when EVERY requested name was unknown — a typo-filled invocation
+  // like `xo --phases buidl,polihs` silently ran the full pipeline.
+  // Distinguish the cases:
+  //   - no phases requested at all  -> default to ALL_PHASES
+  //   - phases requested, all unknown -> run none (the user clearly
+  //     intended a specific subset; running everything is worse than
+  //     running nothing, and phaseWarnings already surfaces the typos)
+  //   - phases requested, some known -> run the known subset
+  const noPhasesRequested = !Array.isArray(options.phases) || options.phases.length === 0;
+  const activePhases = filteredKnownPhases.length > 0
+    ? filteredKnownPhases
+    : (noPhasesRequested ? ALL_PHASES.slice() : []);
 
   const runners = (options.runners && typeof options.runners === 'object')
     ? { ...getDefaultRunners(), ...options.runners }
@@ -1151,18 +1504,19 @@ async function runXoPipeline(options) {
 
   const opts = {
     repoRoot: resolvedRoot,
-    dryRun: options.dryRun || false,
-    maxPolishRounds: options.maxPolishRounds || DEFAULT_MAX_POLISH_ROUNDS,
-    fuzzRuns: options.fuzzRuns || DEFAULT_FUZZ_RUNS,
-    codexReasoning: options.codexReasoning || DEFAULT_CODEX_REASONING,
-    // Audit P2 (round 3): the allowBenchmarkExec opt-in gate we added to
-    // phaseBenchmark needs a callable path from the public entry point.
-    // Thread it through opts so operators can reach the gate via
-    // runXoPipeline({ allowBenchmarkExec: true }) without constructing
-    // phase-level options manually.
-    allowBenchmarkExec: options.allowBenchmarkExec === true,
-    // Audit P1 (round 6): same threading for the new directive opt-in.
-    allowDirectiveExec: options.allowDirectiveExec === true,
+    // Audit P3 (round 14): use the sanitized values computed above
+    // instead of re-reading raw options here. Garbage options
+    // (negative numbers, string instead of bool, etc.) are now
+    // surfaced via optionWarnings[] on the final result.
+    dryRun: sanitizedDryRun,
+    maxPolishRounds: sanitizedMaxPolishRounds,
+    fuzzRuns: sanitizedFuzzRuns,
+    codexReasoning: typeof options.codexReasoning === 'string' && options.codexReasoning.length > 0
+      ? options.codexReasoning
+      : DEFAULT_CODEX_REASONING,
+    allowBenchmarkExec: sanitizedAllowBenchmark,
+    allowDirectiveExec: sanitizedAllowDirective,
+    allowFuzzExec: sanitizedAllowFuzz,
   };
 
   const phases = {};
@@ -1179,12 +1533,27 @@ async function runXoPipeline(options) {
     try {
       return await phaseFn();
     } catch (err) {
+      // Audit P2 (round 9): fallbackShape for BENCHMARK is
+      // { passed: 0, failed: 0, results: [] } — and the old spread
+      // order placed fallbackShape AFTER { failed: true }, so the
+      // numeric `failed: 0` in the shape overwrote the boolean
+      // `failed: true` flag. Summary code then couldn't distinguish
+      // "phase ran and reported 0 failures" from "phase threw mid-
+      // run." Spread the fallback FIRST so real failure markers
+      // always win the last-write-wins race. We ALSO copy passed-
+      // in numeric `failed` into a separate `failedCount` field so
+      // operators can still see the numeric count while the boolean
+      // flag signals the exception.
+      const failed = fallbackShape && typeof fallbackShape.failed === 'number'
+        ? fallbackShape.failed
+        : 0;
       return {
+        ...fallbackShape,
         skipped: false,
         failed: true,
+        failedCount: failed,
         error: err && err.message ? err.message : String(err),
         errorCode: err && err.code ? err.code : null,
-        ...fallbackShape,
       };
     }
   }
@@ -1245,11 +1614,17 @@ async function runXoPipeline(options) {
   // entries that parseXoCommand flagged) at the top level of the result
   // so callers can detect typos without walking into parseXoCommand's
   // output. Empty when all requested phases were known.
-  const phaseWarnings = Array.isArray(options.phaseWarnings)
+  //
+  // Audit P3 (round 9): combine parse-time warnings (from CLI) with
+  // programmatic warnings surfaced by the entry-point phase validator
+  // added above, so both CLI and programmatic callers see typos.
+  const cliWarnings = Array.isArray(options.phaseWarnings)
     ? options.phaseWarnings.slice()
     : [];
+  const phaseWarnings = cliWarnings.concat(programmaticWarnings);
 
-  return { phases, summary, phaseWarnings };
+  // Audit P3 (round 14): surface sanitize-level option warnings too.
+  return { phases, summary, phaseWarnings, optionWarnings };
 }
 
 // ---------------------------------------------------------------------------
