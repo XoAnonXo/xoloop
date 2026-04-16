@@ -143,7 +143,20 @@ function parseXoCommand(argv) {
       const knownSet = new Set(ALL_PHASES);
       const known = requested.filter((p) => knownSet.has(p));
       const unknown = requested.filter((p) => !knownSet.has(p));
-      result.phases = known.length > 0 ? known : ALL_PHASES.slice();
+      // Audit P1 (round 16): the round-7 fix fell back to ALL_PHASES
+      // when every requested name was unknown, matching the
+      // "no requested phases -> default full pipeline" semantic. But
+      // `--phases buidl,polihs` (all typos) is clearly an attempt to
+      // RESTRICT the run; falling through to the full mutating
+      // pipeline is worse than running no phases. Match the round-12
+      // runXoPipeline fix: only fall back to ALL_PHASES when NO
+      // phases were requested. All-unknown stays empty; phaseWarnings
+      // tells the operator why.
+      if (requested.length === 0) {
+        result.phases = ALL_PHASES.slice();
+      } else {
+        result.phases = known;
+      }
       if (unknown.length > 0) {
         if (!Array.isArray(result.phaseWarnings)) result.phaseWarnings = [];
         for (const name of unknown) {
@@ -284,48 +297,130 @@ async function phaseBuild(options, runners) {
   // refuse symlinks via lstat. Anything else gets logged in the
   // returned result as a refused entry so operators see the
   // rejection instead of it happening silently.
+  // Audit P2 (round 17): lstat the approved directory itself before
+  // trusting anything inside it. If `.xoanon/directives/approved` is
+  // a symlink, listApprovedDirectives will happily read whatever
+  // directory it resolves to — a hostile branch could commit the
+  // symlink pointing at `/tmp/evil_directives/` and any directive
+  // auto-executed during the next XO run would come from there.
+  //
+  // Audit P2 (round 18): the round-17 check only covered the leaf
+  // `approved/` directory; a symlinked PARENT (e.g. `.xoanon/` or
+  // `.xoanon/directives/`) would route all of our "in-approved-dir"
+  // verification into a different tree. Walk from the repo root
+  // down to `.xoanon/directives/approved/`, lstat'ing each segment
+  // and refusing the phase if ANY link in the chain is a symlink.
+  const approvedPathSegments = ['.xoanon', 'directives', 'approved'];
+  let cumulativeDir = path.resolve(options.repoRoot);
+  for (const segment of approvedPathSegments) {
+    cumulativeDir = path.join(cumulativeDir, segment);
+    let segLstat;
+    try {
+      segLstat = fs.lstatSync(cumulativeDir);
+    } catch (_segLstatErr) {
+      // Segment missing is fine — we'll fall through to empty list.
+      break;
+    }
+    if (segLstat.isSymbolicLink()) {
+      return {
+        skipped: true,
+        reason: `${path.relative(options.repoRoot, cumulativeDir)} is a symlink — refusing directive phase; a symlinked directory in the approval path undermines the entire opt-in model`,
+        directives: 0,
+        refusedDirectives: [],
+      };
+    }
+  }
+  const approvedDirPath = path.join(directivesBaseDir, 'approved');
   const approvedDirAbs = (() => {
-    try { return fs.realpathSync(path.join(directivesBaseDir, 'approved')); }
+    try { return fs.realpathSync(approvedDirPath); }
     catch (_e) { return path.resolve(directivesBaseDir, 'approved'); }
   })();
   const refusedDirectives = [];
-  directives = (Array.isArray(directives) ? directives : []).filter((d) => {
+  // Audit P2 (round 15): TOCTOU fix — verify each directive path, then
+  // REPLACE `d.path` with the resolved realpath so every subsequent
+  // consumer (runDirective, completeDirective, unlink fallback) uses
+  // the verified target. Previously we called verify(d.path) then
+  // later used d.path again; between those two reads an attacker
+  // could swap the file (e.g. replace the YAML with a symlink to
+  // elsewhere) and bypass the realpath gate. Using the pre-resolved
+  // realpath closes that window.
+  directives = (Array.isArray(directives) ? directives : []).reduce((out, d) => {
     if (!d || typeof d.path !== 'string' || d.path.length === 0) {
       refusedDirectives.push({ path: d && d.path, reason: 'directive entry has no path string' });
-      return false;
+      return out;
     }
     let lstat;
     try {
       lstat = fs.lstatSync(d.path);
     } catch (_lstatErr) {
       refusedDirectives.push({ path: d.path, reason: 'directive file does not exist' });
-      return false;
+      return out;
     }
     if (lstat.isSymbolicLink()) {
       refusedDirectives.push({ path: d.path, reason: 'directive file is a symlink — refused' });
-      return false;
+      return out;
     }
     let realResolved;
     try {
       realResolved = fs.realpathSync(d.path);
     } catch (_realErr) {
       refusedDirectives.push({ path: d.path, reason: 'directive realpath could not be resolved' });
-      return false;
+      return out;
     }
     const rel = path.relative(approvedDirAbs, realResolved);
     if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
       refusedDirectives.push({ path: d.path, reason: `directive resolves outside approved directory (rel=${rel})` });
-      return false;
+      return out;
     }
-    return true;
-  });
+    // Replace the path with the resolved realpath so downstream
+    // execution and archival always target the verified file.
+    //
+    // Audit P2 (round 16/17/18): residual TOCTOU — an attacker with
+    // local write access to the approved/ directory could still
+    // swap the file between our verify and the runner's subsequent
+    // open(), or between the runner's read and our unlink. Node's
+    // fs APIs work on path strings; eliminating the window entirely
+    // would require passing open file descriptors across the runner
+    // boundary or using an OS-level file lock (flock/fcntl). Both
+    // break the stable runner contract and require native bindings.
+    //
+    // Best-effort mitigation (proactive, not audit-driven): capture
+    // a stat fingerprint (dev, ino, size, mtimeMs) at verify time.
+    // We re-stat before unlink and refuse to delete a file whose
+    // fingerprint has changed — catching the post-run swap class of
+    // TOCTOU without any runner-API change. The window between
+    // verify and runDirective's open remains, but "swap and we
+    // silently delete the wrong file" is closed.
+    let verifyFingerprint = null;
+    try {
+      const statAtVerify = fs.statSync(realResolved);
+      verifyFingerprint = {
+        dev: statAtVerify.dev,
+        ino: statAtVerify.ino,
+        size: statAtVerify.size,
+        mtimeMs: statAtVerify.mtimeMs,
+      };
+    } catch (_fingerprintErr) {
+      // Extremely unlikely given the lstat/realpath we just did;
+      // fall through without fingerprint — unlink will be best-
+      // effort as before.
+    }
+    out.push({ ...d, path: realResolved, originalPath: d.path, verifyFingerprint });
+    return out;
+  }, []);
 
+  // Audit P3 (round 17): every early-exit from phaseBuild used to
+  // drop `refusedDirectives` silently. A run where every tracked
+  // directive was rejected (all symlinks, all out-of-approved-dir)
+  // returned "no approved directives" with zero visibility into the
+  // rejections. Include the list in every return path so operators
+  // see what was refused.
   if (!Array.isArray(directives) || directives.length === 0) {
-    return { skipped: true, reason: 'no approved directives', directives: 0 };
+    return { skipped: true, reason: 'no approved directives', directives: 0, refusedDirectives };
   }
 
   if (options.dryRun) {
-    return { skipped: false, dryRun: true, directives: directives.length };
+    return { skipped: false, dryRun: true, directives: directives.length, refusedDirectives };
   }
 
   // Audit P2 (round 2): earlier this phase was calling `runners.build`
@@ -447,6 +542,13 @@ async function phaseBuild(options, runners) {
           || (typeof result.improvements === 'number' && result.improvements > 0)
           || (typeof result.testsAdded === 'number' && result.testsAdded > 0)
           || (Array.isArray(result.results) && result.results.length > 0)
+          // Audit P1 (round 18): directive runner returns `{ mode, options }`
+          // for plan-style directives (e.g. action:'build' which produces a
+          // plan to hand to runBuildPipeline). Treat a non-empty `mode`
+          // string as a positive success signal so those directives aren't
+          // deterministically marked as failed and archived.
+          || (typeof result.mode === 'string' && result.mode.length > 0)
+          || (result.plan && typeof result.plan === 'object')
         );
         ok = hasPositiveSignal;
       } else {
@@ -602,13 +704,49 @@ async function phaseBuild(options, runners) {
         // The trade-off vs archive: no history record survives. That
         // is strictly better than infinite replay AND better than a
         // sidecar that opens an arbitrary-write surface.
-        if (ok) {
+        //
+        // Audit P2 (round 17): the round-14 unlink only ran on
+        // success (`if (ok)`), so a PERMANENTLY-failed directive
+        // whose archive also failed got replayed forever. Extend to
+        // also unlink on permanent failures (non-retryable, non-
+        // pending). Retryable failures still keep the directive in
+        // the queue (by design).
+        const shouldUnlinkAfterCompletionFail = ok || (!looksRetryable && !pendingExternalAction);
+        if (shouldUnlinkAfterCompletionFail) {
           try {
             const realOfPath = fs.realpathSync(d.path);
             const relInside = path.relative(approvedDirAbs, realOfPath);
             if (relInside !== '' && !relInside.startsWith('..') && !path.isAbsolute(relInside)) {
-              fs.unlinkSync(realOfPath);
-              completionSidecarWritten = true;  // field name preserved for result shape
+              // Round-18 proactive TOCTOU mitigation: before unlink,
+              // re-stat and compare against the verify-time
+              // fingerprint. If they differ (swap happened after we
+              // validated the path), do NOT unlink — the file we'd
+              // delete is NOT the file we verified and ran, so
+              // deleting it is wrong. Log via completionError so
+              // operators see the refusal.
+              let fingerprintMatches = true;
+              if (d.verifyFingerprint) {
+                try {
+                  const statNow = fs.statSync(realOfPath);
+                  fingerprintMatches = (
+                    statNow.dev === d.verifyFingerprint.dev
+                    && statNow.ino === d.verifyFingerprint.ino
+                    && statNow.size === d.verifyFingerprint.size
+                    && statNow.mtimeMs === d.verifyFingerprint.mtimeMs
+                  );
+                } catch (_restatErr) {
+                  fingerprintMatches = false;
+                }
+              }
+              if (fingerprintMatches) {
+                fs.unlinkSync(realOfPath);
+                completionSidecarWritten = true;  // field name preserved for result shape
+              } else {
+                const fingerprintErrSummary = 'directive file fingerprint changed between verify and unlink — refusing unlink to avoid deleting a swapped file';
+                completionError = completionError
+                  ? `${completionError}; ${fingerprintErrSummary}`
+                  : fingerprintErrSummary;
+              }
             }
           } catch (_unlinkErr) { /* best-effort; completionError already recorded */ }
         }
@@ -690,20 +828,6 @@ async function phaseFuzz(options, runners) {
   const libDir = path.join(options.repoRoot, 'proving-ground', 'lib');
   let moduleFiles = [];
 
-  // Audit P2 (round 13): clear Node's require cache entries for every
-  // module we're about to fuzz. BUILD/POLISH earlier in the pipeline
-  // may have modified these files; if fuzz_engine.fuzzModule() just
-  // re-requires the same path, Node returns the cached (pre-change)
-  // version and fuzz is measuring stale code. Evict entries from the
-  // cache whose resolved filename lives under libDir so the fuzz
-  // phase sees the current-disk version of every module.
-  try {
-    const libAbs = fs.realpathSync(libDir);
-    for (const key of Object.keys(require.cache)) {
-      if (key.startsWith(libAbs)) delete require.cache[key];
-    }
-  } catch (_cacheErr) { /* non-fatal — best-effort isolation */ }
-
   // Audit P2 (round 11): previous discovery used readdirSync on the top
   // level only. Nested modules under `proving-ground/lib/` (e.g.
   // `proving-ground/lib/polish/strategies.cjs`) were silently skipped
@@ -765,6 +889,27 @@ async function phaseFuzz(options, runners) {
       availableModules: moduleFiles.length,
     };
   }
+
+  // Audit P3 (round 19-final): clear Node's require cache AFTER the
+  // opt-in gate. Previously the eviction ran before the opt-in check,
+  // which meant even an opted-OUT fuzz phase would still mutate
+  // process-wide require-cache state — a hostile branch could depend
+  // on that side effect to reset a targeted module's state without
+  // fuzzing actually running. Moving the eviction past the gate
+  // ensures the phase has zero side effects when disabled.
+  //
+  // Audit P2 (round 13): we clear cache entries for every module we're
+  // about to fuzz. BUILD/POLISH earlier in the pipeline may have
+  // modified these files; if fuzz_engine.fuzzModule() just re-requires
+  // the same path, Node returns the cached (pre-change) version and
+  // fuzz is measuring stale code. Evict cache entries whose resolved
+  // filename lives under libDir so the fuzz phase sees current disk.
+  try {
+    const libAbs = fs.realpathSync(libDir);
+    for (const key of Object.keys(require.cache)) {
+      if (key.startsWith(libAbs)) delete require.cache[key];
+    }
+  } catch (_cacheErr) { /* non-fatal — best-effort isolation */ }
 
   // Audit P1 (round 6): FUZZ auto-discovers every `.cjs`/`.js` under
   // `proving-ground/lib/` and hands it to fuzz_engine.fuzzModule, which
@@ -920,15 +1065,26 @@ async function phaseBenchmark(options, runners) {
   // gets auto-executed on the operator's next pipeline run.
   //
   // Make benchmark execution OPT-IN explicitly:
-  //   - options.allowBenchmarkExec === true    -> run (still git-tracked)
-  //   - overnight.yaml:benchmarks.auto_run=true -> run (still git-tracked)
-  //   - otherwise                              -> skip with clear reason
+  //   - options.allowBenchmarkExec === true -> run (still git-tracked)
+  //   - otherwise                           -> skip with clear reason
   // This closes the auto-exec class entirely by default; operators who
-  // actually want to run benchmarks from the pipeline must say so.
+  // actually want to run benchmarks from the pipeline must say so via
+  // caller-held state (options flag, --allow-benchmark-exec).
+  //
+  // Audit P1 (round 16): the round-15 escape-hatch (reading
+  // overnight.yaml:benchmarks.auto_run) DEFEATS the security model.
+  // Any attacker who can push to the repo can also push an
+  // `overnight.yaml` that sets `benchmarks.auto_run: true`, which
+  // immediately re-enables auto-exec on the operator's next run — the
+  // whole point of the opt-in gate was to keep the control knob in
+  // caller-held state so a committed file cannot flip it. Removed.
+  // Codex round-15 flagged this as a missing documented feature; codex
+  // round-16 correctly flagged the implementation as a security bug.
+  // The right resolution is to remove the documented feature.
   if (benchFiles.length > 0 && options.allowBenchmarkExec !== true) {
     return {
       skipped: true,
-      reason: 'benchmark auto-execution requires explicit opt-in (pass options.allowBenchmarkExec=true or invoke benchmark runner directly); refused by default so tracked benchmark files cannot auto-exec on every XO run',
+      reason: 'benchmark auto-execution requires explicit opt-in (options.allowBenchmarkExec=true or --allow-benchmark-exec); refused by default so tracked benchmark files cannot auto-exec on every XO run. The opt-in must come from caller-held state (flag/option), not from a committed config file that a hostile branch could flip.',
       passed: 0,
       failed: 0,
       results: [],
@@ -1239,6 +1395,20 @@ function buildXoSummary(phaseResults) {
     // `build.results[]` (with ok:false + error) were invisible in the
     // summary. Surface them as phase failures so operators see which
     // directives failed even when the overall phase didn't abort.
+    // Audit low (round 15): BUILD returns refusedDirectives[] for
+    // symlinks, out-of-approved-dir paths, and missing files, but
+    // buildXoSummary ignored it so operators never saw those rejections.
+    // Surface each refusal as a phaseFailure entry so the summary and
+    // report treat them as first-class failures, not silent drops.
+    if (phaseName === 'build' && Array.isArray(phaseResult.refusedDirectives)) {
+      for (const refusal of phaseResult.refusedDirectives) {
+        phaseFailures.push({
+          phase: 'build',
+          directive: (refusal && refusal.path) || '<unknown>',
+          error: `directive refused: ${(refusal && refusal.reason) || 'unknown reason'}`,
+        });
+      }
+    }
     if (phaseName === 'build' && Array.isArray(phaseResult.results)) {
       for (const directiveResult of phaseResult.results) {
         // Audit P2 (round 9): round-6's check flagged every ok:false
@@ -1472,17 +1642,39 @@ async function runXoPipeline(options) {
   // callers passing ['buidl', 'polish'] silently disabled BUILD with
   // no warning. Validate at the entry point too; unknown names go to
   // programmaticWarnings[] so the top-level result surfaces them.
-  const rawPhases = Array.isArray(options.phases) && options.phases.length > 0
-    ? options.phases.filter((p) => typeof p === 'string' && p.length > 0)
+  // Audit P3 (round 18): previously we silently dropped non-string
+  // entries from options.phases via the string filter below, so
+  // `{ phases: [null, undefined, 42] }` (all-non-string) became
+  // effectively `[]` → fell through to the all-unknown "run none"
+  // branch with no warning. Surface non-string entries explicitly
+  // so programmatic callers get feedback on malformed inputs, not a
+  // silent no-op pipeline.
+  const rawPhasesInput = Array.isArray(options.phases) && options.phases.length > 0
+    ? options.phases
+    : null;
+  const programmaticWarnings = [];
+  const rawPhases = rawPhasesInput
+    ? rawPhasesInput.filter((p, idx) => {
+        if (typeof p === 'string' && p.length > 0) return true;
+        programmaticWarnings.push({
+          kind: 'invalid-phase-entry',
+          requested: String(p),
+          index: idx,
+          hint: `options.phases[${idx}] must be a non-empty string; got ${typeof p === 'string' ? '""' : String(p)}`,
+        });
+        return false;
+      })
     : ALL_PHASES.slice();
   const knownPhaseSet = new Set(ALL_PHASES);
   const filteredKnownPhases = rawPhases.filter((p) => knownPhaseSet.has(p));
   const unknownPhases = rawPhases.filter((p) => !knownPhaseSet.has(p));
-  const programmaticWarnings = unknownPhases.map((name) => ({
-    kind: 'unknown-phase',
-    requested: name,
-    hint: `options.phases received "${name}"; known phases are ${ALL_PHASES.join(', ')}`,
-  }));
+  for (const name of unknownPhases) {
+    programmaticWarnings.push({
+      kind: 'unknown-phase',
+      requested: name,
+      hint: `options.phases received "${name}"; known phases are ${ALL_PHASES.join(', ')}`,
+    });
+  }
   // Audit P2 (round 12): round-9's "fall back to ALL_PHASES if empty
   // after filtering" rescued accidental empties but ALSO fell open
   // when EVERY requested name was unknown — a typo-filled invocation
