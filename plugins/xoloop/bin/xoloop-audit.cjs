@@ -19,6 +19,7 @@
 'use strict';
 
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const {
   requireLib,
   ensureConfig,
@@ -83,6 +84,11 @@ async function main() {
   // directory regularly exceeds the audit_caller default of 5min and fails
   // with CODEX_AUDIT_SPAWN_ERROR: ETIMEDOUT.
   const codexTimeoutMs = Number(parseFlag(argv, '--codex-timeout-ms', 900000));
+  // Optional shell command run after each applied round to validate that
+  // the fix didn't break functionality. Non-zero exit triggers automatic
+  // changeSet rollback per audit_runner's runValidation contract.
+  const validateCommand = parseFlag(argv, '--validate', null);
+  const validateTimeoutMs = Number(parseFlag(argv, '--validate-timeout-ms', 600000));
 
   if (!target) {
     console.error('[xoloop-audit] --target is required.');
@@ -143,6 +149,30 @@ async function main() {
       loopOptions.rollbackChangeSet = async (handle) => {
         return rollbackAppliedChangeSet(handle);
       };
+      // Wire test validation between rounds. If the user passed --validate,
+      // run that shell command after each apply; a non-zero exit auto-
+      // rollbacks the changeSet via audit_runner's runValidation contract.
+      if (validateCommand) {
+        loopOptions.runValidation = async ({ round }) => {
+          const t0 = Date.now();
+          const result = spawnSync('bash', ['-lc', validateCommand], {
+            cwd,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'pipe'],
+            maxBuffer: 32 * 1024 * 1024,
+            timeout: validateTimeoutMs,
+          });
+          const elapsedMs = Date.now() - t0;
+          const exitCode = result.status === null ? 1 : result.status;
+          const passed = exitCode === 0;
+          console.log(`[xoloop-audit] round ${round} validation: ${passed ? 'PASS' : 'FAIL'} (${elapsedMs}ms)`);
+          if (!passed) {
+            const tail = (result.stdout + '\n' + result.stderr).slice(-2000);
+            console.log('[xoloop-audit] validation output tail:\n' + tail);
+          }
+          return { passed, exitCode, elapsedMs };
+        };
+      }
     }
     result = await runAuditFixLoop(loopOptions);
   }
