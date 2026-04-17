@@ -22,6 +22,23 @@ const {
   initOvernightEngine,
 } = requireLib('overnight_engine.cjs');
 const { runXoPipeline, formatXoReport } = requireLib('xo_pipeline.cjs');
+const { defaultWorktreeRoot } = requireLib('baton_common.cjs');
+
+// Resolve --batch-id / --batch-dir into an absolute batchDir path.
+// inspect / promote / cleanup all need this; the user naturally passes
+// `--batch-id X` (the id they see in ledger output) rather than the full
+// worktree-root path. Centralize the resolution so we don't crash with
+// "paths[0] argument must be of type string. Received null" when only
+// batchId was supplied.
+function resolveBatchDir(options) {
+  if (options.batchDir && typeof options.batchDir === 'string') {
+    return path.resolve(options.batchDir);
+  }
+  if (options.batchId && typeof options.batchId === 'string') {
+    return defaultWorktreeRoot(options.repoRoot || process.cwd(), options.batchId);
+  }
+  return null;
+}
 
 function parseArgs(argv) {
   const options = {
@@ -97,14 +114,19 @@ async function main() {
       result = await runOvernightBatch(options);
       break;
     case 'inspect':
-      result = await inspectOvernightBatch(options);
-      break;
     case 'promote':
-      result = await promoteOvernightBatch(options);
+    case 'cleanup': {
+      const resolvedBatchDir = resolveBatchDir(options);
+      if (!resolvedBatchDir) {
+        console.error(`[xoloop-overnight] ${options.command} requires --batch-id <id> or --batch-dir <path>`);
+        process.exit(1);
+      }
+      const engineOptions = { ...options, batchDir: resolvedBatchDir };
+      if (options.command === 'inspect') result = await inspectOvernightBatch(engineOptions);
+      else if (options.command === 'promote') result = await promoteOvernightBatch(engineOptions);
+      else result = await cleanupOvernightBatch(engineOptions);
       break;
-    case 'cleanup':
-      result = await cleanupOvernightBatch(options);
-      break;
+    }
     default:
       console.error(`[xoloop-overnight] unknown command: ${options.command}`);
       process.exit(1);

@@ -2539,6 +2539,19 @@ async function runOvernightBatch(options = {}) {
 }
 
 function inspectOvernightBatch(options = {}) {
+  // Smoke-test bug fix: path.resolve(undefined) threw the cryptic
+  // "paths[0] argument must be of type string. Received null" when the
+  // CLI wrapper passed --batch-id without having resolved it to a
+  // full batchDir. Surface a clear AdapterError instead so operators
+  // see "pass --batch-id or --batch-dir" rather than a TypeError.
+  if (!options.batchDir || typeof options.batchDir !== 'string') {
+    throw new AdapterError(
+      'OVERNIGHT_BATCH_DIR_REQUIRED',
+      'batchDir',
+      'inspectOvernightBatch requires options.batchDir (string)',
+      { fixHint: 'Pass the resolved batch directory path, or use the CLI wrapper which resolves --batch-id via defaultWorktreeRoot.' },
+    );
+  }
   const batchDir = path.resolve(options.batchDir);
   const manifestPaths = buildOvernightManifestPaths(batchDir);
   const manifest = loadOvernightManifest(manifestPaths.manifestPath);
@@ -2601,6 +2614,14 @@ function inspectOvernightBatch(options = {}) {
 const { resolveDeferredAudit } = require('./overnight_engine_deferred.cjs');
 
 async function promoteOvernightBatch(options = {}) {
+  if (!options.batchDir || typeof options.batchDir !== 'string') {
+    throw new AdapterError(
+      'OVERNIGHT_BATCH_DIR_REQUIRED',
+      'batchDir',
+      'promoteOvernightBatch requires options.batchDir (string)',
+      { fixHint: 'Pass the resolved batch directory path, or use the CLI wrapper which resolves --batch-id via defaultWorktreeRoot.' },
+    );
+  }
   const batchDir = path.resolve(options.batchDir);
   const manifestPaths = buildOvernightManifestPaths(batchDir);
   const manifest = loadOvernightManifest(manifestPaths.manifestPath);
@@ -2667,6 +2688,14 @@ async function promoteOvernightBatch(options = {}) {
 }
 
 async function cleanupOvernightBatch(options = {}) {
+  if (!options.batchDir || typeof options.batchDir !== 'string') {
+    throw new AdapterError(
+      'OVERNIGHT_BATCH_DIR_REQUIRED',
+      'batchDir',
+      'cleanupOvernightBatch requires options.batchDir (string)',
+      { fixHint: 'Pass the resolved batch directory path, or use the CLI wrapper which resolves --batch-id via defaultWorktreeRoot.' },
+    );
+  }
   const batchDir = path.resolve(options.batchDir);
   const manifestPaths = buildOvernightManifestPaths(batchDir);
   const manifest = loadOvernightManifest(manifestPaths.manifestPath);
