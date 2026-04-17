@@ -1,16 +1,20 @@
 ---
 name: xo-build
-description: Use this skill when the user asks to build, create, implement, scaffold, or write a NEW feature from scratch. Runs serialized TDD — Agent A writes failing tests from acceptance criteria and an exemplar, engine confirms red, Agent B writes implementation, engine confirms green via red→green delta validator. Not for modifying existing code (use xo-polish), not for fixing bugs (use xo-audit).
-allowed-tools: Bash, Read, Edit, Write
+description: Use this skill when the user asks to build, create, implement, scaffold, or write a NEW feature from scratch. Runs serialized TDD via TWO subagents — Agent A (Spec Writer) writes failing tests from acceptance criteria, Agent B (Builder) writes implementation that makes tests pass. Fixed 2-iteration sequence (spec → implementation), red→green validated between them. Not for modifying existing code (use xo-polish), not for fixing bugs (use xo-audit).
+allowed-tools: Agent, Bash, Read, Edit, Write
 ---
 
-# XOLoop — Build Mode
+# XOLoop — Build Mode (subagent-driven, serialized TDD)
 
-Serialized TDD pipeline for greenfield features. Produces test file + implementation file from a `feature.yaml` spec. Two-agent handoff: Spec Writer → Builder, with engine-enforced red→green validation between them.
+Greenfield feature implementation via two-subagent serialized TDD.
+Agent A writes the tests (red baseline), Agent B writes the
+implementation (green). Engine enforces red→green delta validation
+between them.
+
+**Default operational mode — no API key required.**
 
 ## When to invoke
 
-User says any of:
 - "build a new X"
 - "implement a Y function"
 - "create a module that does Z"
@@ -18,62 +22,84 @@ User says any of:
 - "scaffold a utility for..."
 - "write me a ... from scratch"
 
-## How to invoke
+## How it runs
 
-```bash
-# Step 1 — first invocation in a foreign repo: bootstrap
-node $CLAUDE_PLUGIN_ROOT/bin/xoloop-init.cjs --dir .
+1. **Capture intent.** Either:
+   - User passed a `feature.yaml` path → load it
+   - User described inline → prompt them for:
+     - Feature name
+     - Acceptance criteria (list of given/when/then)
+     - Exemplar file (optional — style reference)
+     - Target surface path
+2. **Agent A — Spec Writer.** Spawn Agent with:
+   > Write a test file for `<feature>` that verifies
+   > `<acceptance criteria>`. Tests MUST FAIL without implementation
+   > (reference functions/files that don't exist yet). Style-match
+   > `<exemplar>`. Return a changeSet JSON that creates ONLY the test
+   > file.
+3. **Apply test file.** Shell out to
+   `node $CLAUDE_PLUGIN_ROOT/bin/xoloop-apply-proposal.cjs`.
+4. **Verify RED.** Run the test command. It MUST fail (tests reference
+   non-existent code). If it doesn't fail, the spec is wrong — abort
+   and ask Agent A to produce a corrected spec.
+5. **Agent B — Builder.** Spawn Agent with:
+   > Here's a failing test file for `<feature>`. Here's the exemplar
+   > style. Write the IMPLEMENTATION that makes all tests pass without
+   > touching the test file. Return a changeSet JSON that creates
+   > ONLY the implementation file(s).
+6. **Apply implementation.** Bridge again, with `--validate "<test-cmd>"`.
+7. **Verify GREEN.** Bridge already validated. If tests failed, bridge
+   auto-rolled back implementation; Agent B gets one more chance with
+   the failure output as feedback.
+8. **Output a review bundle.** Write to
+   `.xoloop/features/<feature>/review-bundle.json` with the spec,
+   implementation, test output, and style notes. Nothing is committed
+   until the user explicitly approves.
+9. **Report**: tests added, implementation files created, red→green
+   transition summary, review bundle path.
 
-# Step 2 — BUILD requires a feature.yaml
-node $CLAUDE_PLUGIN_ROOT/bin/xoloop-build.cjs run <featurePath> \
-  --adapter overnight.yaml
+## Proposal schema
 
-# Step 3 — review the generated bundle before promoting
-node $CLAUDE_PLUGIN_ROOT/bin/xoloop-build.cjs review <featureId>
+Agent A returns changeSet with ONLY `create_file` entries for the test
+file(s). Agent B returns changeSet with ONLY `create_file` entries
+for the implementation (NO test-file operations — Agent A already
+wrote them and Agent B must not modify them).
 
-# Step 4 — promote accepted implementation
-node $CLAUDE_PLUGIN_ROOT/bin/xoloop-build.cjs promote <featureId>
-```
+## Why fixed 2 iterations?
 
-### feature.yaml required
+Unlike polish/audit/improve (which loop until saturation), build is a
+structured pipeline: spec, then build. If the spec is wrong, we retry
+Agent A once; if the implementation fails, we retry Agent B once
+(with the failure output as feedback). No more — beyond that, the
+feature needs human re-spec.
 
-BUILD is the only mode that requires a full feature spec. Per locked B.5, minimal-config modes (polish, audit, fuzz) auto-generate; BUILD requires:
+## Defaults
 
-```yaml
-feature: my-new-feature
-version: 1
-surface: src/my_new_feature.js
-acceptance:
-  - given: "input X"
-    when: "function is called"
-    then: "returns Y"
-exemplar: src/similar_existing_file.js   # style reference
-```
-
-### Exemplar handling (locked B.4)
-
-If `exemplar:` is omitted, the wrapper attempts ranked fallback:
-1. Nearest credible in-repo file (rank by extension + directory proximity + framework match; reject vendor/generated/test-fixture)
-2. Bundled generic language exemplar (`$CLAUDE_PLUGIN_ROOT/exemplars/<lang>/module.*`)
-3. Hard-fail with clear error if confidence below threshold
-
-Never picks a random file.
+| Setting | Default |
+|---|---|
+| Iterations | 2 (spec + impl) + up to 1 repair each |
+| Style | inferred from exemplar file |
+| Output location | `.xoloop/features/<feature>/review-bundle.json` |
+| Auto-commit | **NO** — always requires explicit user approval after review |
 
 ## What build does NOT do
 
-- **Not for existing code refinement** → route to `xo-polish`
-- **Not for finding bugs** → route to `xo-audit`
-- **Not for replacing an existing implementation with a better one** → route to `xo-autoresearch`
+- **Not for existing code refinement** → `xo-polish`
+- **Not for finding bugs** → `xo-audit`
+- **Not for replacing an existing implementation** → `xo-autoresearch`
 
-## Output
+## EXTRA: API-key mode
 
-- Test file created and verified to fail (red baseline)
-- Implementation file created and verified to make tests pass (green)
-- Review bundle JSON in `.xoloop/runs/<timestamp>/build-review.json`
-- Nothing committed until user runs `promote`
+```bash
+node $CLAUDE_PLUGIN_ROOT/bin/xoloop-build.cjs run <feature.yaml>
+node $CLAUDE_PLUGIN_ROOT/bin/xoloop-build.cjs review <featureId>
+node $CLAUDE_PLUGIN_ROOT/bin/xoloop-build.cjs promote <featureId>
+```
+Uses `runBuildPipeline` with API-based Opus for Agents A and B.
 
 ## Safety
 
-- Runs in worktree (locked D.1)
-- Prompts once on first net-new file creation (locked D.2)
-- Inherits session credentials (locked D.6)
+- Red→green delta validator enforces tests-fail-then-pass transition
+- Review bundle written but nothing committed until explicit approval
+- Agent A can't touch implementation file; Agent B can't touch test
+  file (enforced via per-agent allowed-paths allowlist)

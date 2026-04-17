@@ -50,6 +50,7 @@ function shouldCoolSurfaceDown(ledger, objectiveHash, surfaceId) {
     'anchor-preflight-failed',
     'invalid-target-window',
     'planner-schema-failed',
+    'planner-call-failed',
     'editor-schema-failed',
     'hallucinated-reference',
   ].includes(entry.reasonCode));

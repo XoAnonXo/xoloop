@@ -18,6 +18,7 @@ const {
   markFirstInvocationComplete,
   parseFlag,
   hasFlag,
+  buildExternalProposalLoader,
 } = require('./_common.cjs');
 
 const { parsePolishOptions, runPolishLoop } = requireLib('polish_runner.cjs');
@@ -25,13 +26,24 @@ const { parsePolishOptions, runPolishLoop } = requireLib('polish_runner.cjs');
 async function main() {
   const argv = process.argv.slice(2);
   if (hasFlag(argv, '--help') || hasFlag(argv, '-h')) {
-    console.log('Usage: xoloop-polish --surface <path> [--rounds N] [--until-saturated] [--dry-run] [--allow-dirty]');
+    console.log('Usage: xoloop-polish --surface <path> [--rounds N] [--until-saturated]');
+    console.log('                     [--dry-run] [--allow-dirty]');
+    console.log('                     [--proposer "<shell-command>"]');
+    console.log('');
+    console.log('Interactive (Claude Code skill): use the xo-polish skill, which runs');
+    console.log('subagent-driven iterations via bin/xoloop-apply-proposal.cjs (no API');
+    console.log('key required).');
+    console.log('');
+    console.log('Headless / CI: run this wrapper. Needs ANTHROPIC_API_KEY unless');
+    console.log('--proposer points to an external command (receives JSON prompt on');
+    console.log('stdin, emits JSON response on stdout).');
     process.exit(0);
   }
 
   const cwd = process.cwd();
   const surface = parseFlag(argv, '--surface', null);
   const allowDirty = hasFlag(argv, '--allow-dirty');
+  const proposerCommand = parseFlag(argv, '--proposer', null);
 
   ensureConfig(cwd);
   enforceDirtyOverlapGate(cwd, surface, allowDirty);
@@ -45,6 +57,14 @@ async function main() {
   }
 
   const options = parsePolishOptions(effectiveArgv);
+  if (proposerCommand) {
+    // EXTRA: route proposals through an external command instead of
+    // the default callModel path. Unlocks CI / headless use without
+    // requiring ANTHROPIC_API_KEY. For interactive Claude Code use,
+    // skip this flag — the subagent-driven skill already handles
+    // proposals via bin/xoloop-apply-proposal.cjs.
+    options.proposalLoader = buildExternalProposalLoader(proposerCommand, cwd);
+  }
   const summary = await runPolishLoop(options);
 
   console.log('\n=== Polish Summary ===');

@@ -1,16 +1,21 @@
 ---
 name: xo-autoresearch
-description: Use this skill when the user asks to research, explore alternatives, propose a different implementation, question the approach, or find a better way to do something. Runs Champion vs Challenger tournament with heterogeneous council (Opus architect + Sonnet pragmatist + Codex hacker), 1-5 anchored rubric on naked AST. Not for polishing within the existing paradigm (use xo-polish), not for bug hunting (use xo-audit).
-allowed-tools: Bash, Read, Edit, Write
+description: Use this skill when the user asks to research, explore alternatives, propose a different implementation, question the approach, or find a better way to do something. Runs a subagent-driven Champion-vs-Challenger tournament — current implementation is Champion; each round spawns a "Challenger" subagent proposing a radically different approach. Both must pass tests; a judge subagent picks the winner on a 1-5 rubric. Converges when Champion wins twice in a row. Default 5 rounds. Not for polishing within the existing paradigm (use xo-polish).
+allowed-tools: Agent, Bash, Read, Edit, Write
 ---
 
-# XOLoop — Autoresearch Mode
+# XOLoop — Autoresearch Mode (subagent-driven)
 
-Questions the paradigm. Champion is the current implementation; Challenger is an alternative the research agent proposes (different algorithm, library, provider, pattern, sometimes language). Both pass the objective gate (tests + benchmark) before reaching the council. Council judges on naked AST (comments / docstrings / prose stripped). A wins twice → converged.
+Questions the paradigm. Champion = current implementation; Challenger =
+subagent proposal of a radically different approach (different
+algorithm, data structure, library, pattern). Both pass the objective
+gate (tests). A judge subagent picks the winner on a 1-5 anchored
+rubric. Champion wins twice → converged.
+
+**Default operational mode — no API key required.**
 
 ## When to invoke
 
-User says any of:
 - "research alternatives to X"
 - "is there a better way to do this?"
 - "find a different approach"
@@ -18,47 +23,71 @@ User says any of:
 - "propose a radical alternative"
 - "explore <domain> for better implementations"
 
-## How to invoke
+## How it runs
 
-```bash
-node $CLAUDE_PLUGIN_ROOT/bin/xoloop-autoresearch.cjs \
-  --target <path> \
-  [--rounds 5] \
-  [--token-cap <tier>]
-```
+1. **Read target + current test suite.** Champion = current code.
+2. **Loop up to 5 rounds** (default — less than polish because each
+   round is heavier).
+   a. **Challenger subagent.** Spawn Agent with prompt:
+      > Propose a radically different implementation of this module
+      > (different algorithm, pattern, library, paradigm — not just
+      > refactoring). Must pass the same tests. Return changeSet JSON.
+   b. **Objective gate.** Apply via
+      `node $CLAUDE_PLUGIN_ROOT/bin/xoloop-apply-proposal.cjs` with
+      `--validate "<test-command>"`. If tests fail, rollback
+      automatically (same bridge contract).
+   c. If Challenger passes, **Judge subagent.** Spawn separate Agent:
+      > Here are two implementations of the same module. Both pass
+      > tests. Score each on: Simplicity (1-5), Cost (1-5),
+      > Maintainability (1-5), Readability (1-5). Return JSON with
+      > scores and the winner.
+      > Version A (Champion): <naked AST>
+      > Version B (Challenger): <naked AST>
+   d. Naked AST = strip comments, docstrings, and prose rationale
+      BEFORE showing to judge, to prevent verbose-JSDoc bias.
+   e. **Borda count.** Compare composite scores; higher wins.
+3. **Convergence criterion.** Champion wins two consecutive rounds →
+   stop. Challenger wins → Challenger becomes new Champion, continue.
+4. **Sensitive-domain gate.** If target touches crypto / auth /
+   public_api / schemas / migrations, do NOT auto-apply a Challenger
+   win. Route to human approval queue with evidence packet
+   (scores, rationale, both implementations).
+5. **Report**: rounds run, Champion history, final implementation,
+   judge scores per round.
 
-### Token tier
+## Proposal schema
 
-| Tier | Cap |
+Same as xo-polish — `{rationale, changeSet: [...]}`. Rationale should
+explain the paradigm shift, not just the edit.
+
+## Defaults
+
+| Setting | Default |
 |---|---|
-| `utility` | 200K (tiny helpers) |
-| `normal` (default) | 750K (standard modules) |
-| `strategic` | 2M (hot paths, public APIs) |
-| `override` | 5M (explicit opt-in only) |
-
-## Sensitive-domain gate (graduated approval)
-
-If target touches crypto / auth / public_api / schemas / migrations:
-- Auto-apply disabled; requires human approval
-- +1 specialist judge added to council (4 total)
-- Dependency quarantine for any new `require/import`
-
-Research still runs — safety is in the gauntlet, not exclusion.
+| Iterations | 5 (less than polish; each round is expensive) |
+| Convergence | Champion wins twice consecutively |
+| Sensitive-domain routing | auto-detect from path patterns (crypto/auth/schemas/migrations) |
 
 ## What autoresearch does NOT do
 
-- **Not for polishing within the existing paradigm** → route to `xo-polish`
-- **Not for hitting a specific metric** → route to `xo-improve`
-- **Not for bug hunting** → route to `xo-audit`
+- **Not for polishing within the existing paradigm** → `xo-polish`
+- **Not for hitting a specific metric** → `xo-improve`
+- **Not for bug hunting** → `xo-audit`
 
-## Output
+## EXTRA: API-key mode (3-judge council)
 
-- Evidence packet YAML in `.xoloop/research/<target>/evidence.yaml`
-- Challenger implementation (if council votes B)
-- Convergence verdict: auto-apply / human-approval / rejected
+```bash
+node $CLAUDE_PLUGIN_ROOT/bin/xoloop-autoresearch.cjs \
+  --target <path> --rounds 5 --token-cap strategic
+```
+Uses Opus (architect) + Sonnet (pragmatist) + Codex (hacker) as
+heterogeneous judges via API. The single-judge subagent path above is
+the default for skill invocations.
 
 ## Safety
 
-- Runs in worktree (locked D.1)
-- Sensitive domains escalate to human approval queue
-- Paradigm shifts (language / runtime / provider) always require human approval
+- Both Champion and Challenger must pass objective gate before reaching
+  judge — broken code never scores
+- Sensitive domains escalate to human approval
+- Paradigm shifts (language/runtime/provider change) always require
+  explicit user confirmation

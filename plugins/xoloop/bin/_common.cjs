@@ -126,6 +126,68 @@ function hasFlag(argv, flag) {
   return argv.includes(flag);
 }
 
+// EXTRA API-key path: build a proposalLoader that shells out to an
+// external command instead of calling the Anthropic/OpenAI API directly.
+// Unlocks CI / headless use without ANTHROPIC_API_KEY. Not used by the
+// default Claude Code subagent path (which goes through
+// bin/xoloop-apply-proposal.cjs instead of the engine's internal loop).
+//
+// Contract for the external command:
+//   - stdin: JSON { systemPrompt, userPrompt, requestKind, surface, objective }
+//   - stdout: JSON { text: "..." } — where "text" is the model response
+//     that the engine's parser (parsePlannerResponse / parseProposal /
+//     parseEditor) will then validate
+//   - non-zero exit => treated as a call-level failure; engine records
+//     planner-call-failed via the round-post-rebuild error-code
+//     classifier
+function buildExternalProposalLoader(command, cwd) {
+  const { spawnSync } = require('node:child_process');
+  return async function externalProposalLoader(ctx) {
+    const stdinPayload = JSON.stringify({
+      systemPrompt: ctx.prompt && ctx.prompt.systemPrompt,
+      userPrompt: ctx.prompt && ctx.prompt.userPrompt,
+      requestKind: ctx.requestKind || 'proposal',
+      surface: ctx.surface || null,
+      objective: ctx.objective || null,
+      errorMessage: ctx.errorMessage || null,
+      priorText: ctx.priorText || null,
+    });
+    const result = spawnSync('bash', ['-lc', command], {
+      cwd,
+      encoding: 'utf8',
+      input: stdinPayload,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      maxBuffer: 32 * 1024 * 1024,
+      timeout: 600000,
+    });
+    if (result.status !== 0) {
+      const err = new Error(
+        `external proposer exited ${result.status} — stderr tail: ${String(result.stderr || '').slice(-1000)}`
+      );
+      err.code = 'MODEL_EXTERNAL_COMMAND_FAILED';
+      throw err;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch (parseErr) {
+      const err = new Error(
+        `external proposer returned non-JSON stdout: ${parseErr.message}`
+      );
+      err.code = 'MODEL_EXTERNAL_COMMAND_INVALID_JSON';
+      throw err;
+    }
+    if (!parsed || typeof parsed.text !== 'string') {
+      const err = new Error(
+        'external proposer JSON must contain a string "text" field'
+      );
+      err.code = 'MODEL_EXTERNAL_COMMAND_INVALID_JSON';
+      throw err;
+    }
+    return { text: parsed.text };
+  };
+}
+
 module.exports = {
   pluginRoot,
   libPath,
@@ -140,4 +202,5 @@ module.exports = {
   markFirstInvocationComplete,
   parseFlag,
   hasFlag,
+  buildExternalProposalLoader,
 };

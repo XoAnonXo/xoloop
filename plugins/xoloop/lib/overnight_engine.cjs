@@ -1514,14 +1514,43 @@ async function executePlannerOnlySurfaceAttempt(options) {
         },
       );
     } catch (error) {
+      // Debug note (subagent-mode discovery): previously every planner
+      // failure — including auth/env/network issues where the model
+      // never even got called — was mislabeled as `planner-schema-
+      // failed`, hiding the real cause (MISSING_API_KEY,
+      // MODEL_EXTERNAL_COMMAND_TIMEOUT, etc.) under a schema-shaped
+      // reason code. Operators debugging 100+ discarded attempts had
+      // no hint that their credentials weren't configured. Classify
+      // first: model-call / auth / network / spawn failures get
+      // `planner-call-failed`; only real parser/schema errors stay
+      // as `planner-schema-failed`.
+      const CALL_LEVEL_CODES = new Set([
+        'MISSING_API_KEY',
+        'MODEL_AUTH_401',
+        'MODEL_CALL_TIMEOUT',
+        'MODEL_CALL_FAILED',
+        'MODEL_EXTERNAL_COMMAND_REQUIRED',
+        'MODEL_EXTERNAL_COMMAND_TIMEOUT',
+        'MODEL_EXTERNAL_COMMAND_SPAWN_FAILED',
+        'MODEL_EXTERNAL_COMMAND_FAILED',
+        'MODEL_EXTERNAL_COMMAND_INVALID_JSON',
+        'MODEL_RESPONSE_TOO_LARGE',
+        'MODEL_RESPONSE_TRUNCATED',
+        'MODEL_SCHEMA_MISMATCH',
+      ]);
+      const errorCode = error && error.code ? error.code : null;
+      const isCallLevel = errorCode && CALL_LEVEL_CODES.has(errorCode);
       return {
         patchFingerprint: null,
         report: discardAttempt(report, {
-          reasonCode: 'planner-schema-failed',
-          nextStep: 'Repair the planner JSON or return no_safe_change.',
+          reasonCode: isCallLevel ? 'planner-call-failed' : 'planner-schema-failed',
+          nextStep: isCallLevel
+            ? `Fix the model call (${errorCode}) before the planner can run.`
+            : 'Repair the planner JSON or return no_safe_change.',
           failureStage: 'planning',
-          failureKind: 'planner-schema-failed',
+          failureKind: isCallLevel ? 'planner-call-failed' : 'planner-schema-failed',
           applyError: error,
+          plannerErrorCode: errorCode,
         }),
       };
     }
@@ -1694,13 +1723,36 @@ async function executeStagedSurfaceAttempt(options) {
       } catch (error) {
         return {
           patchFingerprint,
-          report: discardAttempt(report, {
-            reasonCode: 'planner-schema-failed',
-            nextStep: 'Repair the planner JSON or return no_safe_change.',
-            failureStage: 'planning',
-            failureKind: 'planner-schema-failed',
-            applyError: error,
-          }),
+          report: discardAttempt(report, (() => {
+            // Mirror the round-1 classification: call-level errors
+            // should not masquerade as schema errors.
+            const CALL_LEVEL_CODES = new Set([
+              'MISSING_API_KEY',
+              'MODEL_AUTH_401',
+              'MODEL_CALL_TIMEOUT',
+              'MODEL_CALL_FAILED',
+              'MODEL_EXTERNAL_COMMAND_REQUIRED',
+              'MODEL_EXTERNAL_COMMAND_TIMEOUT',
+              'MODEL_EXTERNAL_COMMAND_SPAWN_FAILED',
+              'MODEL_EXTERNAL_COMMAND_FAILED',
+              'MODEL_EXTERNAL_COMMAND_INVALID_JSON',
+              'MODEL_RESPONSE_TOO_LARGE',
+              'MODEL_RESPONSE_TRUNCATED',
+              'MODEL_SCHEMA_MISMATCH',
+            ]);
+            const errorCode = error && error.code ? error.code : null;
+            const isCallLevel = errorCode && CALL_LEVEL_CODES.has(errorCode);
+            return {
+              reasonCode: isCallLevel ? 'planner-call-failed' : 'planner-schema-failed',
+              nextStep: isCallLevel
+                ? `Fix the model call (${errorCode}) before the planner can run.`
+                : 'Repair the planner JSON or return no_safe_change.',
+              failureStage: 'planning',
+              failureKind: isCallLevel ? 'planner-call-failed' : 'planner-schema-failed',
+              applyError: error,
+              plannerErrorCode: errorCode,
+            };
+          })()),
         };
       }
     }

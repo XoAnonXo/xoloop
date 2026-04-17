@@ -1,0 +1,293 @@
+#!/usr/bin/env node
+/**
+ * xoloop-apply-proposal.cjs — subagent → engine bridge.
+ *
+ * The plugin's default operational mode is "skill-driven loop": the skill
+ * spawns Agent() subagents that produce a changeSet proposal. This binary
+ * is how the skill applies that proposal without going through the engine's
+ * own model-calling loop (which requires an API key).
+ *
+ * Input contract:
+ *   Proposal JSON is read from stdin OR from the file at --proposal-file.
+ *   Format matches change_set_engine's applyChangeSet input:
+ *     {
+ *       "changeSet": [
+ *         { "kind": "replace_once", "path": "rel/path.js",
+ *           "match": "...", "replace": "..." },
+ *         { "kind": "create_file", "path": "new.js", "content": "..." },
+ *         { "kind": "delete_file", "path": "dead.js" }
+ *       ],
+ *       "rationale": "why this change is safe and useful"
+ *     }
+ *
+ * Execution sequence:
+ *   1. Parse + validate proposal shape
+ *   2. Preflight every path through the allowlist (allowed-paths flag)
+ *   3. Call change_set_engine.applyChangeSet (temp-file-stage + atomic
+ *      rename with verification manifest TOCTOU gate)
+ *   4. If --validate "<shell-command>" supplied, run the command; on
+ *      non-zero exit, call rollbackAppliedChangeSet
+ *   5. Emit a JSON report on stdout describing what happened
+ *
+ * Output contract (stdout, exactly one JSON line):
+ *   {
+ *     "applied": boolean,
+ *     "validated": boolean,
+ *     "rolledBack": boolean,
+ *     "operationCount": number,
+ *     "validationExitCode": number|null,
+ *     "validationElapsedMs": number|null,
+ *     "error": string|null,
+ *     "errorCode": string|null,
+ *     "rollbackErrors": [...] | null,
+ *     "filesTouched": ["rel/path.js", ...]
+ *   }
+ *
+ * Exit codes:
+ *   0   proposal applied AND validation passed (or --no-validate)
+ *   1   proposal rejected — schema invalid, path out of scope, or
+ *       apply itself threw
+ *   2   proposal applied then rolled back due to validation failure
+ *   3   fatal error in the bridge itself (stderr has details)
+ *
+ * The skill reads stdout as JSON, then decides keep-iterate / stop-saturated
+ * / stop-degradation based on the report.
+ */
+
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+
+const {
+  requireLib,
+  parseFlag,
+  hasFlag,
+} = require('./_common.cjs');
+
+const {
+  applyChangeSet,
+  rollbackAppliedChangeSet,
+  normalizeChangeSet,
+} = requireLib('change_set_engine.cjs');
+
+function printReport(report) {
+  process.stdout.write(JSON.stringify(report) + '\n');
+}
+
+function readProposalInput(argv) {
+  const proposalFile = parseFlag(argv, '--proposal-file', null);
+  if (proposalFile) {
+    const absolutePath = path.resolve(proposalFile);
+    return fs.readFileSync(absolutePath, 'utf8');
+  }
+  // Read from stdin until EOF.
+  return fs.readFileSync(0, 'utf8');
+}
+
+function parseProposal(raw) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    const error = new Error(`proposal JSON parse failed: ${err.message}`);
+    error.code = 'XOLOOP_PROPOSAL_INVALID_JSON';
+    throw error;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    const error = new Error('proposal must be a JSON object with a changeSet array');
+    error.code = 'XOLOOP_PROPOSAL_NOT_OBJECT';
+    throw error;
+  }
+  if (!Array.isArray(parsed.changeSet)) {
+    const error = new Error('proposal.changeSet must be an array');
+    error.code = 'XOLOOP_PROPOSAL_MISSING_CHANGESET';
+    throw error;
+  }
+  return parsed;
+}
+
+function parseAllowedPaths(argv, cwd) {
+  const raw = parseFlag(argv, '--allowed-paths', null);
+  if (!raw) return null; // means no allowlist enforcement
+  return raw.split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => path.isAbsolute(entry) ? entry : path.resolve(cwd, entry));
+}
+
+async function runValidation(command, cwd, timeoutMs) {
+  const t0 = Date.now();
+  const result = spawnSync('bash', ['-lc', command], {
+    cwd,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: timeoutMs,
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  const elapsedMs = Date.now() - t0;
+  const exitCode = result.status === null ? 1 : result.status;
+  return {
+    passed: exitCode === 0,
+    exitCode,
+    elapsedMs,
+    stdoutTail: String(result.stdout || '').slice(-2000),
+    stderrTail: String(result.stderr || '').slice(-2000),
+  };
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  if (hasFlag(argv, '--help') || hasFlag(argv, '-h')) {
+    console.log('Usage: xoloop-apply-proposal [--proposal-file <path>]');
+    console.log('                             [--allowed-paths <p1,p2,...>]');
+    console.log('                             [--validate "<shell-command>"]');
+    console.log('                             [--validate-timeout-ms N]');
+    console.log('                             [--no-validate]');
+    console.log('');
+    console.log('Reads a changeSet proposal on stdin (or from --proposal-file),');
+    console.log('applies it atomically through change_set_engine, runs the');
+    console.log('validation command, and rolls back on failure. Emits one');
+    console.log('JSON line to stdout describing the outcome.');
+    process.exit(0);
+  }
+
+  const cwd = process.cwd();
+  const allowedPaths = parseAllowedPaths(argv, cwd);
+  const validateCommand = parseFlag(argv, '--validate', null);
+  const skipValidate = hasFlag(argv, '--no-validate');
+  const validateTimeoutMs = Number(parseFlag(argv, '--validate-timeout-ms', 600000));
+
+  let proposal;
+  try {
+    const raw = readProposalInput(argv);
+    proposal = parseProposal(raw);
+  } catch (err) {
+    printReport({
+      applied: false,
+      validated: false,
+      rolledBack: false,
+      operationCount: 0,
+      validationExitCode: null,
+      validationElapsedMs: null,
+      error: err.message,
+      errorCode: err.code || 'XOLOOP_PROPOSAL_READ_FAILED',
+      rollbackErrors: null,
+      filesTouched: [],
+    });
+    process.exit(1);
+  }
+
+  // Normalize + extract file-touched list for the report.
+  let normalized;
+  try {
+    normalized = normalizeChangeSet(proposal.changeSet);
+  } catch (err) {
+    printReport({
+      applied: false,
+      validated: false,
+      rolledBack: false,
+      operationCount: 0,
+      validationExitCode: null,
+      validationElapsedMs: null,
+      error: err.message,
+      errorCode: err.code || 'XOLOOP_CHANGESET_INVALID',
+      rollbackErrors: null,
+      filesTouched: [],
+    });
+    process.exit(1);
+  }
+  const filesTouched = Array.from(new Set(normalized.map((op) => op.path).filter(Boolean)));
+
+  // Apply the changeSet.
+  let handle;
+  try {
+    handle = applyChangeSet(proposal.changeSet, {
+      cwd,
+      allowedPaths: allowedPaths || undefined,
+    });
+  } catch (err) {
+    printReport({
+      applied: false,
+      validated: false,
+      rolledBack: false,
+      operationCount: normalized.length,
+      validationExitCode: null,
+      validationElapsedMs: null,
+      error: err.message,
+      errorCode: err.code || 'XOLOOP_APPLY_FAILED',
+      rollbackErrors: err.rollbackErrors || null,
+      filesTouched,
+    });
+    process.exit(1);
+  }
+
+  // Optionally validate. --no-validate or no command → skip.
+  let validation = null;
+  if (validateCommand && !skipValidate) {
+    validation = await runValidation(validateCommand, cwd, validateTimeoutMs);
+  }
+
+  if (validation && !validation.passed) {
+    // Roll back and report.
+    let rollbackErrors = null;
+    try {
+      const rollbackResult = rollbackAppliedChangeSet(handle);
+      rollbackErrors = Array.isArray(rollbackResult) && rollbackResult.length > 0
+        ? rollbackResult
+        : null;
+    } catch (rollbackErr) {
+      rollbackErrors = [{
+        path: null,
+        action: 'rollback',
+        error: rollbackErr.message || String(rollbackErr),
+      }];
+    }
+    printReport({
+      applied: true,
+      validated: false,
+      rolledBack: true,
+      operationCount: normalized.length,
+      validationExitCode: validation.exitCode,
+      validationElapsedMs: validation.elapsedMs,
+      error: `validation failed (exit ${validation.exitCode})`,
+      errorCode: 'XOLOOP_VALIDATION_FAILED',
+      validationStderrTail: validation.stderrTail,
+      validationStdoutTail: validation.stdoutTail,
+      rollbackErrors,
+      filesTouched,
+    });
+    process.exit(2);
+  }
+
+  printReport({
+    applied: true,
+    validated: validation ? validation.passed : null,
+    rolledBack: false,
+    operationCount: normalized.length,
+    validationExitCode: validation ? validation.exitCode : null,
+    validationElapsedMs: validation ? validation.elapsedMs : null,
+    error: null,
+    errorCode: null,
+    rollbackErrors: null,
+    filesTouched,
+  });
+  process.exit(0);
+}
+
+main().catch((err) => {
+  printReport({
+    applied: false,
+    validated: false,
+    rolledBack: false,
+    operationCount: 0,
+    validationExitCode: null,
+    validationElapsedMs: null,
+    error: `bridge fatal: ${err.message || String(err)}`,
+    errorCode: err.code || 'XOLOOP_BRIDGE_FATAL',
+    rollbackErrors: null,
+    filesTouched: [],
+  });
+  process.exit(3);
+});

@@ -1,16 +1,22 @@
 ---
 name: xo-fuzz
-description: Use this skill when the user asks to fuzz, stress-test, property-test, or find crashes in existing code. Runs fast-check property-based fuzzing on module exports, distinguishing AdapterErrors (expected rejections) from real bugs (TypeError/RangeError/etc). Writes crash corpus for CI replay. Not for unit testing (use xo-build), not for logic-level bugs (use xo-audit).
+description: Use this skill when the user asks to fuzz, stress-test, property-test, or find crashes in existing code. Runs fast-check property-based fuzzing on module exports. This mode is deterministic — no subagents or API required. Distinguishes AdapterErrors (expected rejections) from real bugs (TypeError/RangeError/etc). Writes crash corpus for CI replay.
 allowed-tools: Bash, Read
 ---
 
-# XOLoop — Fuzz Mode
+# XOLoop — Fuzz Mode (deterministic, no LLM)
 
-Property-based fuzzing that distinguishes expected rejections from real bugs. An `AdapterError` (structured `err.code`) is fine — it's the module saying "no" intentionally. Anything else (TypeError, RangeError, unhandled promise rejection, timeout) is a real bug and gets written to the crash corpus.
+Property-based fuzzing via fast-check. **This mode does not use LLM
+calls at all** — it's pure property testing that generates adversarial
+inputs and distinguishes expected rejections (`AdapterError` with
+`err.code`) from real bugs (`TypeError`, `RangeError`, unhandled
+promise rejection, etc).
+
+No API key required, no subagents spawned — the fuzz engine is fully
+deterministic given a seed.
 
 ## When to invoke
 
-User says any of:
 - "fuzz this"
 - "stress test X"
 - "property-test Y"
@@ -23,7 +29,6 @@ User says any of:
 ```bash
 node $CLAUDE_PLUGIN_ROOT/bin/xoloop-fuzz.cjs \
   --module <path> \
-  --exports "<fnName1,fnName2>" \
   [--runs 1000] \
   [--seed <int>]
 ```
@@ -41,12 +46,13 @@ node $CLAUDE_PLUGIN_ROOT/bin/xoloop-fuzz.cjs \
 
 ## Output
 
-- Crash corpus entries in `.xoloop/corpus/<module>/<hash>.json` (inputs + stack)
+- Crash corpus entries in `.xoloop/corpus/<module>/<hash>.json`
+  (inputs + stack)
 - CI can replay via `--replay-corpus` flag
 - Summary: total runs, shrunk crashes, replay coverage
 
 ## Safety
 
 - Read-only — fuzz never modifies code
-- Per-worktree lock (locked D.5 — read-only mode)
+- No LLM calls, no network, no API key
 - No filesystem writes outside `.xoloop/corpus/`
