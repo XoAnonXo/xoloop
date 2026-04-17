@@ -7,6 +7,9 @@
 
 'use strict';
 
+const path = require('node:path');
+const fs = require('node:fs');
+
 const {
   requireLib,
   ensureConfig,
@@ -22,22 +25,48 @@ const {
   initOvernightEngine,
 } = requireLib('overnight_engine.cjs');
 const { runXoPipeline, formatXoReport } = requireLib('xo_pipeline.cjs');
-const { defaultWorktreeRoot } = requireLib('baton_common.cjs');
+const { loadOvernightAdapter } = requireLib('overnight_adapter.cjs');
+
+// Default when the adapter doesn't override it (mirrors
+// overnight_engine.cjs:DEFAULT_REPORT_DIR).
+const DEFAULT_REPORT_DIR = 'proving-ground/reports/overnight';
 
 // Resolve --batch-id / --batch-dir into an absolute batchDir path.
-// inspect / promote / cleanup all need this; the user naturally passes
-// `--batch-id X` (the id they see in ledger output) rather than the full
-// worktree-root path. Centralize the resolution so we don't crash with
-// "paths[0] argument must be of type string. Received null" when only
-// batchId was supplied.
+//
+// Round-1 smoke test caught path.resolve(undefined) throwing cryptic
+// "paths[0] must be of type string. Received null". Round-2 smoke test
+// caught a worse bug in my round-1 fix: defaultWorktreeRoot returns
+// `<repo>-baton-worktrees/<id>` (git worktree location), but the engine
+// writes the manifest at `<repoRoot>/<adapter.defaults.reportDir>/<id>/`.
+// Worktree dir ≠ report/manifest dir — completely different trees.
+//
+// Correct resolution order:
+//   1. --batch-dir <path>                → absolute-resolve it
+//   2. --batch-id <id> + overnight.yaml  → repoRoot/reportDir/id
+//   3. --batch-id <id> without adapter   → fall back to repoRoot/DEFAULT_REPORT_DIR/id
+//   4. None                              → return null (wrapper prints clean error)
 function resolveBatchDir(options) {
   if (options.batchDir && typeof options.batchDir === 'string') {
     return path.resolve(options.batchDir);
   }
-  if (options.batchId && typeof options.batchId === 'string') {
-    return defaultWorktreeRoot(options.repoRoot || process.cwd(), options.batchId);
+  if (!options.batchId || typeof options.batchId !== 'string') {
+    return null;
   }
-  return null;
+  const repoRoot = options.repoRoot || process.cwd();
+  let reportDir = DEFAULT_REPORT_DIR;
+  try {
+    const adapter = loadOvernightAdapter(
+      options.adapterPath || path.join(repoRoot, 'overnight.yaml'),
+      { repoRoot },
+    );
+    if (adapter && adapter.defaults && adapter.defaults.reportDir) {
+      reportDir = adapter.defaults.reportDir;
+    }
+  } catch (_adapterErr) {
+    // Adapter missing/invalid — fall through with DEFAULT_REPORT_DIR.
+    // Caller's downstream MANIFEST_NOT_FOUND is still actionable.
+  }
+  return path.resolve(repoRoot, reportDir, options.batchId);
 }
 
 function parseArgs(argv) {
