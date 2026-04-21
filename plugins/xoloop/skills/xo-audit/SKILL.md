@@ -24,9 +24,14 @@ finding. All apply through the same test-gated engine bridge as polish.
 
 ## How it runs
 
-1. **Read target** (file or directory list).
-2. **Discover validation command** (same as polish).
-3. **Round 1 — Auditor subagent.** Spawn Agent with prompt:
+1. **Initialize or resume the session.** Run
+   `node $CLAUDE_PLUGIN_ROOT/bin/xoloop-session.cjs init --mode audit
+   --objective "<what we're auditing>" --files "<paths>"`. Creates
+   `.xoloop/session.md` + `.xoloop/session.jsonl`. If a session
+   already exists, read it — prior findings and dead-ends help.
+2. **Read target** (file or directory list).
+3. **Discover validation command** (same as polish).
+4. **Round 1 — Auditor subagent.** Spawn Agent with prompt:
    > Review these files for P1 (exploitable / silent data corruption),
    > P2 (breaks under unusual conditions), P3 (code smell), and low
    > findings. Return ONLY a JSON array:

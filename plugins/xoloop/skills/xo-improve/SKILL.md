@@ -25,10 +25,15 @@ about (latency, memory, cost, throughput).
 
 ## How it runs
 
-1. **Verify benchmark exists.** If no benchmark defined, tell the user
+1. **Initialize the session** via
+   `node $CLAUDE_PLUGIN_ROOT/bin/xoloop-session.cjs init --mode improve
+   --objective "<metric to improve>" --files "<paths>"`. Every round's
+   metric measurement is persisted so the MAD-based confidence score
+   (below) stabilizes as the session progresses.
+2. **Verify benchmark exists.** If no benchmark defined, tell the user
    to run `/xo-benchmark create` first or switch to `/xo-polish` for
    open-ended refinement.
-2. **Baseline run.** Execute the benchmark once, record the metric.
+3. **Baseline run.** Execute the benchmark once, record the metric.
 3. **Loop N rounds** (default: **7**):
    a. Spawn a subagent. Give it:
       - Current target file content
@@ -63,9 +68,19 @@ rationales to avoid repeating ideas.
 | Setting | Default |
 |---|---|
 | Iterations | 7 |
-| Improvement threshold | 3% over baseline |
+| Improvement threshold | MAD-based confidence ≥ 2.0× (pi-autoresearch pattern) |
 | Benchmark | required (skill will refuse if none defined) |
 | Validation | test command + benchmark command |
+
+## MAD-based confidence (noise-aware)
+
+After 3+ rounds, compute confidence via
+`node $CLAUDE_PLUGIN_ROOT/bin/xoloop-session.cjs confidence --values "<csv>" --direction lower`.
+Returns `{ confidence, color, bestImprovement, mad }`. Color meanings:
+`green` (≥2.0× = likely real), `yellow` (1.0-2.0× = above noise but
+marginal — re-run to confirm), `red` (<1.0× = within noise, discard
+unless other evidence). **Advisory only** — the skill still decides
+keep/discard, confidence is context for the decision.
 
 ## What improve does NOT do
 

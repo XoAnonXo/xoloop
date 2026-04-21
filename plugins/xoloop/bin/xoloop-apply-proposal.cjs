@@ -137,27 +137,93 @@ async function runValidation(command, cwd, timeoutMs) {
   };
 }
 
+// Parse METRIC lines from a benchmark script's stdout.
+// Format (pi-autoresearch style): `METRIC name=value` per line.
+// Additional formats tolerated: `METRIC name value`, `METRIC name: value`.
+function parseMetricLines(stdout) {
+  const out = [];
+  for (const line of String(stdout || '').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('METRIC')) continue;
+    const rest = trimmed.slice('METRIC'.length).trim();
+    // `name=value` or `name value` or `name: value`
+    const eqMatch = rest.match(/^([A-Za-z0-9_\-.]+)\s*[=:]\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*(\S*)$/);
+    const spaceMatch = !eqMatch ? rest.match(/^([A-Za-z0-9_\-.]+)\s+(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*(\S*)$/) : null;
+    const m = eqMatch || spaceMatch;
+    if (!m) continue;
+    const value = Number(m[2]);
+    if (!Number.isFinite(value)) continue;
+    out.push({ name: m[1], value, unit: m[3] || null });
+  }
+  return out;
+}
+
+async function runBenchmark(command, cwd, timeoutMs) {
+  const t0 = Date.now();
+  const result = spawnSync('bash', ['-lc', command], {
+    cwd,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: timeoutMs,
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  const elapsedMs = Date.now() - t0;
+  const exitCode = result.status === null ? 1 : result.status;
+  const metrics = parseMetricLines(result.stdout);
+  return {
+    passed: exitCode === 0,
+    exitCode,
+    elapsedMs,
+    metrics,
+    stdoutTail: String(result.stdout || '').slice(-2000),
+    stderrTail: String(result.stderr || '').slice(-2000),
+  };
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   if (hasFlag(argv, '--help') || hasFlag(argv, '-h')) {
     console.log('Usage: xoloop-apply-proposal [--proposal-file <path>]');
     console.log('                             [--allowed-paths <p1,p2,...>]');
     console.log('                             [--validate "<shell-command>"]');
+    console.log('                             [--benchmark "<shell-command>"]');
+    console.log('                             [--asi <json-string>]');
     console.log('                             [--validate-timeout-ms N]');
+    console.log('                             [--benchmark-timeout-ms N]');
     console.log('                             [--no-validate]');
     console.log('');
     console.log('Reads a changeSet proposal on stdin (or from --proposal-file),');
-    console.log('applies it atomically through change_set_engine, runs the');
-    console.log('validation command, and rolls back on failure. Emits one');
-    console.log('JSON line to stdout describing the outcome.');
+    console.log('applies it atomically through change_set_engine, optionally');
+    console.log('runs --benchmark (captures METRIC name=value lines from stdout),');
+    console.log('runs --validate (correctness gate), and rolls back on failure.');
+    console.log('Emits one JSON line to stdout describing the outcome.');
+    console.log('');
+    console.log('--asi accepts a JSON string with free-form agent-supplied');
+    console.log('information (what I learned, why I tried this, what to try');
+    console.log('next). Persisted in the bridge report for session ledger use.');
     process.exit(0);
   }
 
   const cwd = process.cwd();
   const allowedPaths = parseAllowedPaths(argv, cwd);
   const validateCommand = parseFlag(argv, '--validate', null);
+  const benchmarkCommand = parseFlag(argv, '--benchmark', null);
+  const asiRaw = parseFlag(argv, '--asi', null);
   const skipValidate = hasFlag(argv, '--no-validate');
   const validateTimeoutMs = Number(parseFlag(argv, '--validate-timeout-ms', 600000));
+  const benchmarkTimeoutMs = Number(parseFlag(argv, '--benchmark-timeout-ms', 600000));
+
+  // Parse agent-supplied information (ASI). Must be valid JSON; otherwise
+  // we surface as a warning on the report instead of swallowing it.
+  let asi = null;
+  let asiWarning = null;
+  if (asiRaw) {
+    try {
+      asi = JSON.parse(asiRaw);
+    } catch (parseErr) {
+      asiWarning = `ASI JSON parse failed: ${parseErr.message}. Pass a valid JSON string.`;
+    }
+  }
 
   let proposal;
   try {
@@ -223,6 +289,15 @@ async function main() {
     process.exit(1);
   }
 
+  // Run benchmark (optional). Metrics captured; exit code surfaces but
+  // does NOT gate keep/discard on its own — the validate command (if
+  // provided) is the correctness gate. Benchmark runs independently of
+  // --no-validate (operators may want metric-only runs).
+  let benchmark = null;
+  if (benchmarkCommand) {
+    benchmark = await runBenchmark(benchmarkCommand, cwd, benchmarkTimeoutMs);
+  }
+
   // Optionally validate. --no-validate or no command → skip.
   let validation = null;
   if (validateCommand && !skipValidate) {
@@ -251,6 +326,10 @@ async function main() {
       operationCount: normalized.length,
       validationExitCode: validation.exitCode,
       validationElapsedMs: validation.elapsedMs,
+      benchmarkMetrics: benchmark ? benchmark.metrics : null,
+      benchmarkExitCode: benchmark ? benchmark.exitCode : null,
+      asi,
+      asiWarning,
       error: `validation failed (exit ${validation.exitCode})`,
       errorCode: 'XOLOOP_VALIDATION_FAILED',
       validationStderrTail: validation.stderrTail,
@@ -268,6 +347,11 @@ async function main() {
     operationCount: normalized.length,
     validationExitCode: validation ? validation.exitCode : null,
     validationElapsedMs: validation ? validation.elapsedMs : null,
+    benchmarkMetrics: benchmark ? benchmark.metrics : null,
+    benchmarkExitCode: benchmark ? benchmark.exitCode : null,
+    benchmarkElapsedMs: benchmark ? benchmark.elapsedMs : null,
+    asi,
+    asiWarning,
     error: null,
     errorCode: null,
     rollbackErrors: null,

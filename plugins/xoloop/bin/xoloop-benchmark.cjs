@@ -21,10 +21,72 @@ const {
 const { loadBenchmark } = requireLib('benchmark_loader.cjs');
 const { runBenchmarkCase } = requireLib('benchmark_runner.cjs');
 
+// Parse `METRIC name=value [unit]` lines out of a script's stdout.
+// Mirrors the pi-autoresearch contract so operators can drop an
+// `autoresearch.sh`-style script and get structured metrics out without
+// writing a full benchmark.yaml. Three accepted formats:
+//   METRIC name=value
+//   METRIC name: value
+//   METRIC name value
+function parseMetricLines(stdout) {
+  const out = [];
+  for (const line of String(stdout || '').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('METRIC')) continue;
+    const rest = trimmed.slice('METRIC'.length).trim();
+    const eqMatch = rest.match(/^([A-Za-z0-9_\-.]+)\s*[=:]\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*(\S*)$/);
+    const spaceMatch = !eqMatch ? rest.match(/^([A-Za-z0-9_\-.]+)\s+(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*(\S*)$/) : null;
+    const m = eqMatch || spaceMatch;
+    if (!m) continue;
+    const value = Number(m[2]);
+    if (!Number.isFinite(value)) continue;
+    out.push({ name: m[1], value, unit: m[3] || null });
+  }
+  return out;
+}
+
+function runScriptCommand(argv) {
+  const scriptPath = parseFlag(argv, '--script', null);
+  if (!scriptPath) {
+    console.error('[xoloop-benchmark] --script is required for run (when using simpler pi-style contract) or use --benchmark <yaml> for SHA-256-locked mode.');
+    process.exit(1);
+  }
+  const absScript = path.resolve(scriptPath);
+  if (!fs.existsSync(absScript)) {
+    console.error(`[xoloop-benchmark] script not found: ${absScript}`);
+    process.exit(1);
+  }
+  const t0 = Date.now();
+  const result = spawnSync('bash', [absScript], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  const elapsedMs = Date.now() - t0;
+  const exitCode = result.status === null ? 1 : result.status;
+  const metrics = parseMetricLines(result.stdout);
+  const report = {
+    mode: 'script',
+    scriptPath: absScript,
+    exitCode,
+    elapsedMs,
+    metricCount: metrics.length,
+    metrics,
+    stdoutTail: String(result.stdout || '').slice(-2000),
+    stderrTail: String(result.stderr || '').slice(-2000),
+  };
+  process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+  process.exit(exitCode === 0 && metrics.length > 0 ? 0 : 1);
+}
+
 async function runCommand(argv) {
+  if (hasFlag(argv, '--script')) {
+    return runScriptCommand(argv);
+  }
   const benchmarkPath = parseFlag(argv, '--benchmark', null);
   if (!benchmarkPath) {
-    console.error('[xoloop-benchmark] --benchmark is required for run.');
+    console.error('[xoloop-benchmark] run requires either --script <bash> (simpler pi-style contract) or --benchmark <yaml> (SHA-256-locked).');
     process.exit(1);
   }
   const suite = loadBenchmark(path.resolve(benchmarkPath));
@@ -74,8 +136,12 @@ async function main() {
   const sub = argv[0];
   if (!sub || sub === '--help' || sub === '-h') {
     console.log('Usage:');
-    console.log('  xoloop-benchmark run --benchmark <path>');
+    console.log('  xoloop-benchmark run --benchmark <yaml>    SHA-256-locked mode');
+    console.log('  xoloop-benchmark run --script <bash>       simpler pi-style contract');
     console.log('  xoloop-benchmark create --entry-point "<cmd>" --output <path>');
+    console.log('');
+    console.log('Script mode: bash script outputs `METRIC name=value` lines. Any');
+    console.log('metric, any workload. Inspired by pi-autoresearch.');
     process.exit(0);
   }
   if (sub === 'run') return runCommand(argv.slice(1));
