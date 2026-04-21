@@ -1,11 +1,15 @@
 {
   "name": "xoloop",
-  "version": "0.1.0",
-  "description": "XOLoop — loop-based code improvement framework for Claude Code. Wraps 8 deterministic modes (build, polish, fuzz, benchmark, improve, audit, autoresearch, overnight) for iterative compound engineering in any repo.",
+  "version": "0.2.0",
+  "description": "XOLoop — subagent-driven code improvement framework for Claude Code. 9 modes (build, polish, fuzz, benchmark, improve, audit, autoresearch, overnight, finalize) with session persistence, MAD-based noise-aware metrics, atomic patch apply, and opt-in auto-exec gates. No API key required for the default path.",
   "author": {
-    "name": "xoanonxoLoop"
+    "name": "XoAnonXo"
   },
-  "homepage": "https://github.com/xoanon/xoloop",
+  "homepage": "https://github.com/XoAnonXo/xoloop",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/XoAnonXo/xoloop"
+  },
   "license": "MIT",
   "keywords": [
     "iteration",
@@ -13,6 +17,9 @@
     "audit",
     "fuzz",
     "tdd",
-    "compound-engineering"
+    "compound-engineering",
+    "subagent",
+    "session-persistence",
+    "autoresearch"
   ]
 }

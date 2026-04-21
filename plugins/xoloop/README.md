@@ -1,25 +1,48 @@
 # XOLoop — Claude Code Plugin
 
-Loop-based code improvement framework for Claude Code. Install once; every
-Claude Code session in any repo gains 8 iterative modes that use **Agent
-subagents as the default proposer**.
+Subagent-driven code improvement framework for Claude Code. Install once;
+every Claude Code session in any repo gains 9 iterative modes that use
+**Agent subagents as the default proposer**.
 
 **No API key required for the default path.** The proposer IS the Claude
 subagent you spawn — no separate Anthropic/OpenAI account needed. API-key
 mode exists as an EXTRA for CI / headless / true-overnight runs.
 
-## The 8 modes
+## v0.2.0 — what's new
+
+- **Session persistence** — `.xoloop/session.md` + `.xoloop/session.jsonl`
+  + `.xoloop/ideas.md` survive context resets. A fresh subagent reads
+  these and resumes where the last session left off. Inspired by
+  [pi-autoresearch](https://github.com/davebcn87/pi-autoresearch).
+- **`xo-finalize`** — new 9th mode. Turns a noisy session into clean
+  reviewable branches, one per logical change, from the merge-base.
+- **MAD-based confidence score** in `xo-improve` — noise-aware
+  improvement scoring (green/yellow/red) replaces the fixed 3%
+  threshold. Works well with flaky benchmarks, ML training loss, etc.
+- **ASI (Agent-Supplied Information)** — `--asi <json>` on every apply;
+  the subagent's "what I learned, why it failed, what to try next"
+  survives rollbacks.
+- **Simpler benchmark contract** — `xoloop-benchmark run --script <bash>`
+  parses `METRIC name=value` lines (pi-autoresearch style) alongside
+  the SHA-256-locked yaml mode.
+- **Security hardening** — TOCTOU-free symlink refusal (O_NOFOLLOW),
+  markdown injection sanitization, opt-in gates for all auto-exec
+  phases (benchmark, fuzz, directive).
+- 19 findings closed across 5 audit rounds on the new modules.
+
+## The 9 modes
 
 | Mode | Default iterations | Trigger phrases | What it does |
 |---|---|---|---|
 | **xo-build** | 2 (spec + impl) | "build new…", "implement…", "scaffold…" | Two-subagent TDD: Agent A writes failing tests, Agent B writes implementation |
 | **xo-polish** | 7 | "polish…", "refine…", "clean up…", "tighten…" | Subagent proposes refinement → bridge applies atomically → tests gate → keep or rollback |
 | **xo-fuzz** | deterministic | "fuzz…", "property-test…", "find edge cases…" | fast-check property fuzzing (no LLM, no API) |
-| **xo-benchmark** | deterministic | "benchmark…", "lock output…" | SHA-256-locked deterministic behavior tests (no LLM, no API) |
-| **xo-improve** | 7 | "make X faster", "reduce memory…", "hit this benchmark" | Subagent proposes optimization → benchmark runs → keep if metric improved without breaking tests |
+| **xo-benchmark** | deterministic | "benchmark…", "lock output…" | SHA-256-locked deterministic tests + simpler `--script` contract with `METRIC name=value` lines |
+| **xo-improve** | 7 | "make X faster", "reduce memory…", "hit this benchmark" | Benchmark-driven optimization with MAD-based noise-aware confidence score |
 | **xo-audit** | 7 | "audit…", "find bugs in…", "security review…" | Auditor subagent finds P1/P2/P3 findings; fixer subagents one-per-blocking, bridge-gated |
 | **xo-autoresearch** | 5 | "research alternatives to…", "is there a better way…" | Champion vs Challenger subagent tournament with judge subagent scoring on 1-5 rubric |
 | **xo-overnight** | 50 | "run overnight", "full XO pipeline" | Chained orchestrator across phases, budget-managed |
+| **xo-finalize** | n/a | "finalize…", "split into PRs", "turn run into branches" | Group kept proposals by non-overlapping file sets, create independent reviewable branches from merge-base |
 
 ## Why subagent-default / API-key-extra
 

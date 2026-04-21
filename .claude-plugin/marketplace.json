@@ -4,14 +4,14 @@
     "name": "XoAnonXo"
   },
   "metadata": {
-    "description": "XOLoop — loop-based code improvement framework for Claude Code. 8 modes: build, polish, fuzz, benchmark, improve, audit, autoresearch, overnight.",
-    "version": "0.1.0"
+    "description": "XOLoop — subagent-driven code improvement framework for Claude Code. 9 modes: build, polish, fuzz, benchmark, improve, audit, autoresearch, overnight, finalize.",
+    "version": "0.2.0"
   },
   "plugins": [
     {
       "name": "xoloop",
-      "description": "Loop-based code improvement — tournament-based polishing, TDD building, property-based fuzzing, Codex+Opus audit loop, Champion-vs-Challenger autoresearch, and overnight orchestration. Works in any Node or Python repo.",
-      "version": "0.1.0",
+      "description": "Subagent-driven code improvement (no API key required). 9 modes: TDD build, tournament-based polish, property-based fuzz, SHA-256-locked benchmarks + simpler METRIC script contract, benchmark-driven improve with MAD-based confidence, codex+Opus audit loop, Champion-vs-Challenger autoresearch, overnight orchestrator, and finalize (splits noisy runs into reviewable PRs). Session persistence across context resets via .xoloop/session.md + session.jsonl. Atomic patch apply with TOCTOU-free symlink protection.",
+      "version": "0.2.0",
       "author": {
         "name": "XoAnonXo"
       },
