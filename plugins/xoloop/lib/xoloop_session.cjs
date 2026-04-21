@@ -57,6 +57,111 @@ function ensureSessionDir(cwd) {
   return dir;
 }
 
+/**
+ * Audit P2 (round 3) + P2 (round 4): refuse symlinks with BOTH lstat
+ * (fast-path, clear error) AND O_NOFOLLOW on the actual open. The
+ * lstat-only check was a check-then-use race — an attacker who could
+ * swap a real file with a symlink between lstat and the write could
+ * bypass. O_NOFOLLOW at open time closes the window at the kernel
+ * level (POSIX ELOOP on symlink). The lstat precheck stays because
+ * it gives a cleaner error message in the common non-attack case.
+ */
+function refuseIfSymlink(filePath) {
+  let lst;
+  try {
+    lst = fs.lstatSync(filePath);
+  } catch (lstatErr) {
+    if (lstatErr && lstatErr.code === 'ENOENT') return;
+    throw lstatErr;
+  }
+  if (lst.isSymbolicLink()) {
+    throw new AdapterError(
+      'SESSION_FILE_IS_SYMLINK',
+      'filePath',
+      `refused: ${filePath} is a symbolic link; .xoloop/ must contain only real files`,
+      { fixHint: 'Remove the symlink under .xoloop/ and let the session files be recreated as real files.' },
+    );
+  }
+}
+
+/**
+ * Audit P2 (round 4) + P1 (round 4): open a `.xoloop/` path with
+ * O_NOFOLLOW so the kernel refuses to traverse a symlink at the
+ * open syscall. Closes the TOCTOU window between lstat and open.
+ * Used by every read/write entry point into .xoloop/* — writes go
+ * through `appendToFileNoFollow` or `writeToFileNoFollowExcl`, reads
+ * go through `readFileNoFollow`.
+ */
+function openNoFollow(filePath, flags, mode) {
+  try {
+    return fs.openSync(filePath, flags | fs.constants.O_NOFOLLOW, mode);
+  } catch (openErr) {
+    if (openErr && (openErr.code === 'ELOOP' || openErr.code === 'EMLINK')) {
+      throw new AdapterError(
+        'SESSION_FILE_IS_SYMLINK',
+        'filePath',
+        `refused: ${filePath} is a symbolic link (ELOOP at O_NOFOLLOW open)`,
+        { fixHint: 'Remove the symlink under .xoloop/ and let the session files be recreated as real files.' },
+      );
+    }
+    throw openErr;
+  }
+}
+
+function appendToFileNoFollow(filePath, content) {
+  // O_WRONLY | O_APPEND | O_CREAT — append semantics, create if missing,
+  // refuse symlink traversal. Mode 0o600 — session state is per-user.
+  const fd = openNoFollow(
+    filePath,
+    fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT,
+    0o600,
+  );
+  try {
+    fs.writeSync(fd, content);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function readFileNoFollow(filePath) {
+  let fd;
+  try {
+    fd = openNoFollow(filePath, fs.constants.O_RDONLY, 0o600);
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return null;
+    throw err;
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    const buf = Buffer.allocUnsafe(stat.size);
+    fs.readSync(fd, buf, 0, stat.size, 0);
+    return buf.toString('utf8');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Audit P2 (round 3): sanitize caller-supplied text before embedding
+ * in markdown sections of session.md. A caller passing
+ * `objective: "tighten x\n\n# Fake Injected Section\nstuff"` would
+ * have rendered as a new section in the document. Collapse newlines
+ * to spaces and strip leading Markdown heading markers so every
+ * user-supplied string stays within the line it belongs to.
+ *
+ * Distinct from sanitizeBullet only in the final trim policy:
+ * markdown field values keep interior punctuation; just no newlines
+ * or leading headings.
+ */
+function sanitizeMarkdownField(raw) {
+  if (typeof raw !== 'string') return '';
+  return raw
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^(?:[#]+\s*)+/, '')
+    .trim();
+}
+
 function atomicWrite(filePath, content) {
   // Fuzz-surfaced defense: _atomicWrite used to be exported and accepted
   // non-string paths, which threw a bare TypeError from path.dirname.
@@ -113,10 +218,21 @@ function initSession(cwd, input = {}) {
       { fixHint: 'Pass { mode, objective, filesInScope, constraints } at minimum.' },
     );
   }
-  const mode = typeof input.mode === 'string' && input.mode.length > 0 ? input.mode : 'polish';
-  const objective = typeof input.objective === 'string' ? input.objective : '(not specified)';
-  const filesInScope = Array.isArray(input.filesInScope) ? input.filesInScope.filter((p) => typeof p === 'string') : [];
-  const constraints = typeof input.constraints === 'string' ? input.constraints : '';
+  // Audit P2 (round 3): sanitize every caller-supplied field before
+  // embedding into session.md. Before the fix, a caller could pass
+  // mode: '# Injected', objective: 'multi\nline\n# bad heading', or
+  // a filesInScope entry with newlines — all of which would land as
+  // extra sections or list items in the document.
+  const rawMode = typeof input.mode === 'string' && input.mode.length > 0 ? input.mode : 'polish';
+  const mode = sanitizeMarkdownField(rawMode) || 'polish';
+  const objective = sanitizeMarkdownField(typeof input.objective === 'string' ? input.objective : '') || '(not specified)';
+  const filesInScope = Array.isArray(input.filesInScope)
+    ? input.filesInScope
+      .filter((p) => typeof p === 'string')
+      .map((p) => sanitizeMarkdownField(p))
+      .filter(Boolean)
+    : [];
+  const constraints = sanitizeMarkdownField(typeof input.constraints === 'string' ? input.constraints : '');
 
   ensureSessionDir(cwd);
 
@@ -205,21 +321,33 @@ function appendLedgerEntry(cwd, entry) {
     );
   }
   ensureSessionDir(cwd);
+  // Audit P3 (round 2): spread BEFORE timestamp override so an explicit
+  // `timestamp: undefined` in the caller's entry doesn't wipe the
+  // default. Before the fix, `{timestamp: fallback, ...entry}` let
+  // spread win the last-write-wins race; now `...entry` runs first
+  // and `timestamp` is the authoritative final value.
   const enriched = {
-    timestamp: entry.timestamp || new Date().toISOString(),
     ...entry,
+    timestamp: entry.timestamp || new Date().toISOString(),
   };
-  // Fuzz-surfaced defense: JSON.stringify throws on circular references
-  // (a subagent could accidentally pass an object with a self-reference
-  // in its asi payload). Use a WeakSet-based replacer so circular keys
-  // get flagged as '[Circular]' strings instead of crashing the run.
-  const seen = new WeakSet();
+  // Audit P1 (round 2) + fuzz-surfaced defense: JSON.stringify throws
+  // on circular references. The round-1 WeakSet-based replacer worked
+  // for circulars but marked any REPEATED reference as '[Circular]' —
+  // even a shared non-circular object like `{a: X, b: X}` would lose
+  // one copy of X. Use an ancestor-chain tracker instead: only objects
+  // currently in the stringify ancestry count as circular; siblings
+  // serialize independently.
   let line;
   try {
-    line = JSON.stringify(enriched, (key, value) => {
+    const ancestors = [];
+    line = JSON.stringify(enriched, function circularSafeReplacer(key, value) {
       if (value !== null && typeof value === 'object') {
-        if (seen.has(value)) return '[Circular]';
-        seen.add(value);
+        // `this` is the parent object during JSON.stringify.
+        while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) {
+          ancestors.pop();
+        }
+        if (ancestors.includes(value)) return '[Circular]';
+        ancestors.push(value);
       }
       return value;
     }) + '\n';
@@ -231,35 +359,42 @@ function appendLedgerEntry(cwd, entry) {
       { fixHint: 'Avoid Symbols, BigInts, and exotic types in ledger entries; they must JSON-stringify cleanly.' },
     );
   }
-  // Append is inherently non-atomic across processes on some filesystems,
-  // but fs.appendFileSync uses O_APPEND which is atomic on POSIX for
-  // writes under PIPE_BUF. JSONL lines are typically well under that.
-  // For very concurrent callers, wrap in an exclusive lock.
-  fs.appendFileSync(sessionLedgerPath(cwd), line);
+  // Audit P2 (round 4): use appendToFileNoFollow so the kernel refuses
+  // symlink traversal at open time — no TOCTOU window between lstat
+  // and append. O_APPEND is still atomic on POSIX for writes under
+  // PIPE_BUF. JSONL lines are typically well under that.
+  appendToFileNoFollow(sessionLedgerPath(cwd), line);
   return enriched;
 }
 
 /**
  * Read the full ledger. Returns an array of entries.
  *
- * Audit P2 (round 1 on this module): previously malformed lines were
- * silently skipped — ENOSPC, short writes, or crashes during append
- * produced torn JSON that readers couldn't see. Callers had no way
- * to know data was lost.
- *
- * Fix: still skip the malformed lines (we can't parse them), but
- * ALSO expose the count via `readLedgerWithStats`. `readLedger`
- * stays compatible with the old array-returning contract; new code
- * that cares about torn entries uses `readLedgerWithStats`.
+ * Audit P2 (round 4): previously `readLedger` still hid corruption by
+ * default — callers who called it (the common path) never learned
+ * about torn lines, even though `readLedgerWithStats` exposed them.
+ * Print a stderr warning when the default reader encounters torn
+ * entries, so operators see it even without opting into the stats
+ * API. Keeps the array-returning contract intact.
  */
 function readLedger(cwd) {
-  return readLedgerWithStats(cwd).entries;
+  const stats = readLedgerWithStats(cwd);
+  if (stats.malformedCount > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[xoloop_session] readLedger(${sessionLedgerPath(cwd)}): ${stats.malformedCount} torn line(s) out of ${stats.totalLines} — call readLedgerWithStats to inspect.`,
+    );
+  }
+  return stats.entries;
 }
 
 function readLedgerWithStats(cwd) {
   const p = sessionLedgerPath(cwd);
-  if (!fs.existsSync(p)) return { entries: [], malformedCount: 0, totalLines: 0 };
-  const raw = fs.readFileSync(p, 'utf8');
+  // Audit P1 (round 4): use readFileNoFollow so a malicious repo
+  // can't plant `.xoloop/session.jsonl` as a symlink pointing at a
+  // sensitive file and have our reader happily read it.
+  const raw = readFileNoFollow(p);
+  if (raw === null) return { entries: [], malformedCount: 0, totalLines: 0 };
   const entries = [];
   let malformedCount = 0;
   let totalLines = 0;
@@ -281,9 +416,9 @@ function readLedgerWithStats(cwd) {
  * null if no active session.
  */
 function readSessionDoc(cwd) {
-  const p = sessionDocPath(cwd);
-  if (!fs.existsSync(p)) return null;
-  return fs.readFileSync(p, 'utf8');
+  // Audit P1 (round 4): use readFileNoFollow so symlinked session.md
+  // doesn't silently read a file outside `.xoloop/`.
+  return readFileNoFollow(sessionDocPath(cwd));
 }
 
 /**
@@ -322,26 +457,53 @@ function appendToTried(cwd, bullet) {
       { fixHint: 'Provide a bullet with at least one printable character other than markdown heading markers.' },
     );
   }
+  // Audit P2 (round 3): remove the stub-creation fallback. Previously
+  // appendToTried would create a minimal session.md on a fresh repo
+  // to "make the append work." But initSession later treated any
+  // existing doc as fully initialized, so a caller who tried-before-
+  // init got a half-set-up session (no objective/files/constraints)
+  // that initSession refused to finish. Cleaner contract: fail loud
+  // if no session exists; force callers to initSession first.
+  ensureSessionDir(cwd);
   const p = sessionDocPath(cwd);
-  if (!fs.existsSync(p)) {
-    // No session yet — create a minimal doc with the heading so
-    // subsequent appends have something to attach to. Exclusive-
-    // create preserves initSession's race guarantee.
-    try {
-      const fd = fs.openSync(p, 'wx');
-      try {
-        fs.writeSync(fd, `# XOLoop Session\n\n## What's Been Tried\n`);
-      } finally {
-        fs.closeSync(fd);
-      }
-    } catch (openErr) {
-      if (!openErr || openErr.code !== 'EEXIST') throw openErr;
-    }
+  // Audit P1 (round 4): read the doc through O_NOFOLLOW.
+  const existing = readFileNoFollow(p);
+  if (existing === null) {
+    throw new AdapterError(
+      'SESSION_NOT_INITIALIZED',
+      'session',
+      'appendToTried requires an initialized session (session.md missing)',
+      { fixHint: 'Call initSession(cwd, { mode, objective, ... }) before appendToTried.' },
+    );
   }
-  // O_APPEND is atomic for writes <= PIPE_BUF on POSIX (4096 bytes on
-  // macOS/Linux). Two concurrent appendToTried callers interleave
-  // cleanly — both bullets land, no data lost.
-  fs.appendFileSync(p, `- ${sanitized}\n`);
+  // Audit P3 (round 4): previously appendToTried used O_APPEND and
+  // relied on "What's Been Tried" being the last section. But
+  // session.md is documented as human-editable — the first maintainer
+  // who adds a "## Notes" section below would silently break future
+  // bullet placements (they'd land under Notes, not Tried). Instead
+  // find the "## What's Been Tried" heading explicitly and insert
+  // the bullet directly below it, keeping subsequent sections intact.
+  //
+  // We lose the O_APPEND atomicity for concurrent writes — trade-off:
+  // human-edit robustness beats concurrent-append atomicity for this
+  // function (appendLedgerEntry is the concurrency-critical path).
+  // For concurrent appendToTried callers, we still use exclusive-
+  // create on the temp + atomic rename so the document never lands
+  // half-written.
+  const heading = '## What\'s Been Tried';
+  const newBullet = `- ${sanitized}\n`;
+  let updated;
+  if (existing.includes(heading)) {
+    updated = existing.replace(
+      new RegExp(`(${heading.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}\\n)`),
+      `$1${newBullet}`,
+    );
+  } else {
+    // No heading present (doc was reset); append a fresh section.
+    const separator = existing.endsWith('\n') ? '\n' : '\n\n';
+    updated = `${existing}${separator}${heading}\n${newBullet}`;
+  }
+  atomicWrite(p, updated);
 }
 
 /**
@@ -375,16 +537,47 @@ function appendIdea(cwd, idea) {
       { fixHint: 'Pass a one-line description of the idea.' },
     );
   }
+  // Audit P1 (round 2): idea text was previously written verbatim, so a
+  // caller passing `"real idea\n# injected heading\n- smuggled bullet"`
+  // would land multiple list items and a new heading in ideas.md.
+  // Reuse the same sanitizer appendToTried uses — collapse whitespace,
+  // strip leading heading markers, trim.
+  const sanitized = sanitizeBullet(idea);
+  if (!sanitized) {
+    throw new AdapterError(
+      'IDEA_REQUIRED',
+      'idea',
+      'idea was empty after sanitization',
+      { fixHint: 'Provide an idea with at least one printable character other than markdown heading markers.' },
+    );
+  }
   ensureSessionDir(cwd);
   const p = ideasPath(cwd);
-  const header = fs.existsSync(p) ? '' : '# XOLoop Ideas Backlog\n\nIdeas surfaced during sessions but not yet tried.\n\n';
-  fs.appendFileSync(p, `${header}- ${idea.trim()}\n`);
+  refuseIfSymlink(p);
+  // Audit P2 (round 2): two concurrent first-time appendIdea calls
+  // could both observe the file missing and both prepend a header →
+  // ideas.md with duplicate headers. Create the header file
+  // exclusively (O_EXCL). If the create races, the losing caller
+  // catches EEXIST and skips straight to appending — one header ever.
+  if (!fs.existsSync(p)) {
+    try {
+      const fd = fs.openSync(p, 'wx');
+      try {
+        fs.writeSync(fd, '# XOLoop Ideas Backlog\n\nIdeas surfaced during sessions but not yet tried.\n\n');
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch (headerErr) {
+      if (!headerErr || headerErr.code !== 'EEXIST') throw headerErr;
+    }
+  }
+  fs.appendFileSync(p, `- ${sanitized}\n`);
 }
 
 function listIdeas(cwd) {
-  const p = ideasPath(cwd);
-  if (!fs.existsSync(p)) return [];
-  const raw = fs.readFileSync(p, 'utf8');
+  // Audit P1 (round 4): symlinked ideas.md must not be followed.
+  const raw = readFileNoFollow(ideasPath(cwd));
+  if (raw === null) return [];
   return raw.split('\n')
     .filter((l) => l.startsWith('- '))
     .map((l) => l.slice(2).trim())

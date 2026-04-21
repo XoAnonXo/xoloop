@@ -64,6 +64,7 @@ function parseArgs(argv) {
     branchPrefix: parseFlag(argv, '--branch-prefix', 'xoloop/'),
     ledgerPath: parseFlag(argv, '--ledger', null),
     repoRoot: parseFlag(argv, '--repo-root', process.cwd()),
+    allowDirty: hasFlag(argv, '--allow-dirty'),
   };
 }
 
@@ -158,18 +159,36 @@ function createGroupBranch(repoRoot, baseSha, summary, dryRun) {
   if (dryRun) {
     return { ok: true, dryRun: true, branchName, baseSha };
   }
-  // Create branch off baseSha
+  // Audit P1 (round 5): list commits to replay BEFORE checking out the
+  // new branch. Previously we did `git checkout -b <name> <baseSha>`
+  // first, which moved HEAD to baseSha; the subsequent `baseSha..HEAD`
+  // range became empty and every branch was created with no commits
+  // replayed. Snapshot the pre-checkout HEAD commits first.
+  const fileSet = new Set(summary.files);
+  const baseCommits = listCommitsSinceBase(repoRoot, baseSha);
+  const relevantCommits = baseCommits.filter((sha) => commitTouchesAny(repoRoot, sha, fileSet));
+
+  // Audit P3 (round 5): whole-commit cherry-pick can bleed unrelated
+  // files into the branch if a source commit touched both group
+  // files AND orphan files. Detect mixed-scope commits and surface a
+  // warning on the result so operators see which branches carry extra
+  // file changes — they can choose to split manually or accept.
+  const mixedScopeCommits = [];
+  for (const sha of relevantCommits) {
+    const commitFiles = commitFileList(repoRoot, sha);
+    const overflow = commitFiles.filter((f) => !fileSet.has(f));
+    if (overflow.length > 0) {
+      mixedScopeCommits.push({ sha, overflow });
+    }
+  }
+
+  // Create branch off baseSha.
   const createResult = git(['checkout', '-b', branchName, baseSha], repoRoot);
   if (!createResult.ok) {
     return { ok: false, error: `failed to create branch ${branchName}: ${createResult.stderr}` };
   }
-  // Cherry-pick commits from HEAD that touch any of this group's files.
-  // We cherry-pick onto the new branch; conflicts abort.
-  const fileSet = new Set(summary.files);
-  const baseCommits = listCommitsSinceBase(repoRoot, baseSha);
   const picked = [];
-  for (const sha of baseCommits) {
-    if (!commitTouchesAny(repoRoot, sha, fileSet)) continue;
+  for (const sha of relevantCommits) {
     const pickResult = git(['cherry-pick', '--allow-empty', sha], repoRoot);
     if (!pickResult.ok) {
       git(['cherry-pick', '--abort'], repoRoot);
@@ -183,7 +202,22 @@ function createGroupBranch(repoRoot, baseSha, summary, dryRun) {
     }
     picked.push(sha);
   }
-  return { ok: true, branchName, baseSha, pickedCount: picked.length };
+  return {
+    ok: true,
+    branchName,
+    baseSha,
+    pickedCount: picked.length,
+    mixedScopeCommits,
+    mixedScopeWarning: mixedScopeCommits.length > 0
+      ? `${mixedScopeCommits.length} cherry-picked commit(s) also touch files outside this group's file set. Review the branch diff to decide whether to accept or split further.`
+      : null,
+  };
+}
+
+function commitFileList(repoRoot, commitSha) {
+  const result = git(['show', '--name-only', '--format=', commitSha], repoRoot);
+  if (!result.ok) return [];
+  return result.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -236,6 +270,23 @@ async function main() {
   if (opts.dryRun) {
     process.stdout.write(JSON.stringify(plan, null, 2) + '\n');
     process.exit(0);
+  }
+
+  // Audit P2 (round 5): dirty-worktree guard for the write path. Every
+  // other plugin wrapper refuses to operate on a dirty tree unless
+  // --allow-dirty is passed; finalize jumped straight to git mutation
+  // without the check. If an operator had uncommitted edits, the
+  // subsequent `git checkout -b` could silently carry those edits
+  // across branches. Require a clean tree or explicit opt-in.
+  if (!opts.allowDirty) {
+    const statusResult = git(['status', '--porcelain=v1'], cwd);
+    if (statusResult.ok && statusResult.stdout.trim().length > 0) {
+      console.error('[xoloop-finalize] working tree is dirty — refusing to mutate git state.');
+      console.error('[xoloop-finalize] commit/stash local edits first, or pass --allow-dirty to proceed anyway.');
+      console.error('[xoloop-finalize] dirty files:');
+      console.error(statusResult.stdout.split('\n').slice(0, 20).map((l) => '  ' + l).join('\n'));
+      process.exit(1);
+    }
   }
 
   // Execute the plan.
