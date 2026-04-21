@@ -1,15 +1,12 @@
 {
   "name": "xoloop",
-  "version": "0.2.0",
-  "description": "XOLoop — subagent-driven code improvement framework for Claude Code. 9 modes (build, polish, fuzz, benchmark, improve, audit, autoresearch, overnight, finalize) with session persistence, MAD-based noise-aware metrics, atomic patch apply, and opt-in auto-exec gates. No API key required for the default path.",
+  "version": "0.3.0",
+  "description": "XOLoop — subagent-driven code improvement framework for Claude Code. 11 modes (build, simplify, polish, fuzz, benchmark, improve, autoresearch, audit, docs, overnight, finalize) with session persistence, MAD-based noise-aware metrics, atomic patch apply, and opt-in auto-exec gates. No API key required for the default path.",
   "author": {
     "name": "XoAnonXo"
   },
   "homepage": "https://github.com/XoAnonXo/xoloop",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/XoAnonXo/xoloop"
-  },
+  "repository": "https://github.com/XoAnonXo/xoloop",
   "license": "MIT",
   "keywords": [
     "iteration",

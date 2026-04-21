@@ -113,14 +113,46 @@ const MODE_TRIGGERS = {
     patterns: [
       /\brun\s+(the\s+)?overnight\b/i,
       /\brun\s+the\s+full\s+(loop|pipeline|xo)/i,
-      /\bchain\s+(polish|audit|improve|fuzz)/i,
+      /\bchain\s+(polish|audit|improve|fuzz|simplify)/i,
       /\bimprove\s+.+?\s+while\s+I\s+sleep\b/i,
       /\brun\s+all\s+modes\b/i,
       /\bovernight\s+engine\b/i,
       /\bfull\s+xo\s+pipeline\b/i,
     ],
     antipatterns: [],
-    hint: 'User intent looks like OVERNIGHT. Consider routing through xo-overnight skill (full XO pipeline: polish + fuzz + benchmark + improve + audit).',
+    hint: 'User intent looks like OVERNIGHT. Consider routing through xo-overnight skill (full XO pipeline: simplify + polish + fuzz + benchmark + improve + autoresearch + audit + docs).',
+  },
+
+  'xo-simplify': {
+    patterns: [
+      /\b(simplify|shrink|reduce\s+complexity|remove\s+dead\s+code|dead[\s-]code)/i,
+      /\b(collapse|inline)\s+(?:\w+\s+){0,3}(wrapper|abstraction|abstractions|layer|layers|adapter|adapters|indirection|indirections)\b/i,
+      /\b(delete|kill|drop)\s+(the\s+|this\s+|unused\s+|dead\s+)(wrapper|helper|branch|code|indirection|abstraction|layer)/i,
+      /\bmake\s+(this|it|\w+)\s+smaller\b/i,
+      /\b(fewer\s+lines|less\s+code|less\s+complex)/i,
+      /\bremove\s+(the\s+|this\s+)?(unused|redundant|unnecessary|dead)\b/i,
+    ],
+    antipatterns: [
+      /\bpolish\b/i,
+      /\bdocument\b/i,
+      /\bbenchmark\b/i,
+      /\bfaster\b/i,
+    ],
+    hint: 'User intent looks like SIMPLIFY. Consider routing through xo-simplify skill (deletion-focused — collapses abstractions, removes dead code, only internal symbols, metric-gated).',
+  },
+
+  'xo-docs': {
+    patterns: [
+      /\b(generate|update|refresh|sync|write)\s+(the\s+)?(docs|documentation|readme|jsdoc|docstrings?|changelog)\b/i,
+      /\b(document|documenting)\s+(this|the\s+\w+)\b/i,
+      /\badd\s+(jsdoc|docstrings?)\b/i,
+      /\bmake\s+the\s+docs\s+(current|up[\s-]to[\s-]date|accurate)\b/i,
+      /\bauto[\s-]?doc\b/i,
+    ],
+    antipatterns: [
+      /\bexplain\s+(this|the\s+code)\s+to\s+me\b/i, // conversational, not a skill
+    ],
+    hint: 'User intent looks like DOCS. Consider routing through xo-docs skill (3-round pipeline: scan + generate + polish + polish; only touches docblocks and doc files).',
   },
 };
 

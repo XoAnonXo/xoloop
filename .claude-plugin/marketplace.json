@@ -4,32 +4,19 @@
     "name": "XoAnonXo"
   },
   "metadata": {
-    "description": "XOLoop — subagent-driven code improvement framework for Claude Code. 9 modes: build, polish, fuzz, benchmark, improve, audit, autoresearch, overnight, finalize.",
-    "version": "0.2.0"
+    "description": "XOLoop — subagent-driven code improvement framework for Claude Code. 11 modes: build, simplify, polish, fuzz, benchmark, improve, autoresearch, audit, docs, overnight, finalize.",
+    "version": "0.3.0"
   },
   "plugins": [
     {
       "name": "xoloop",
-      "description": "Subagent-driven code improvement (no API key required). 9 modes: TDD build, tournament-based polish, property-based fuzz, SHA-256-locked benchmarks + simpler METRIC script contract, benchmark-driven improve with MAD-based confidence, codex+Opus audit loop, Champion-vs-Challenger autoresearch, overnight orchestrator, and finalize (splits noisy runs into reviewable PRs). Session persistence across context resets via .xoloop/session.md + session.jsonl. Atomic patch apply with TOCTOU-free symlink protection.",
-      "version": "0.2.0",
-      "author": {
-        "name": "XoAnonXo"
-      },
+      "description": "Subagent-driven code improvement (no API key required). 11 modes: TDD build, deletion-focused simplify (metric-gated: sloc/cyclomatic/exports must decrease), tournament-based polish, property-based fuzz, SHA-256-locked benchmarks + METRIC script contract, benchmark-driven improve with MAD-based confidence, codex+Opus audit loop, Champion-vs-Challenger autoresearch, doc-generation (scan + generate + polish + polish), overnight orchestrator (11-phase, 80-budget), and finalize (splits noisy runs into reviewable PRs). Session persistence across context resets via .xoloop/session.md + session.jsonl. Atomic patch apply with TOCTOU-free symlink protection.",
+      "version": "0.3.0",
+      "author": { "name": "XoAnonXo" },
       "homepage": "https://github.com/XoAnonXo/xoloop",
       "repository": "https://github.com/XoAnonXo/xoloop",
       "license": "MIT",
-      "keywords": [
-        "iteration",
-        "tournament",
-        "audit",
-        "fuzz",
-        "tdd",
-        "compound-engineering",
-        "code-improvement",
-        "polish",
-        "benchmark",
-        "autoresearch"
-      ],
+      "keywords": ["iteration","tournament","audit","fuzz","tdd","compound-engineering","code-improvement","polish","simplify","docs","benchmark","autoresearch"],
       "category": "development",
       "source": "./plugins/xoloop",
       "strict": false

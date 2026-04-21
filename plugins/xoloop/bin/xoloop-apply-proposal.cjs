@@ -72,6 +72,11 @@ const {
   normalizeChangeSet,
 } = requireLib('change_set_engine.cjs');
 
+// Optional mode gates (loaded lazily — they're only required when
+// --require-simplify or --require-docs is passed).
+function loadSimplifyEngine() { return requireLib('xo_simplify_engine.cjs'); }
+function loadDocsEngine() { return requireLib('xo_docs_engine.cjs'); }
+
 function printReport(report) {
   process.stdout.write(JSON.stringify(report) + '\n');
 }
@@ -212,6 +217,8 @@ async function main() {
   const skipValidate = hasFlag(argv, '--no-validate');
   const validateTimeoutMs = Number(parseFlag(argv, '--validate-timeout-ms', 600000));
   const benchmarkTimeoutMs = Number(parseFlag(argv, '--benchmark-timeout-ms', 600000));
+  const requireSimplify = hasFlag(argv, '--require-simplify');
+  const requireDocs = hasFlag(argv, '--require-docs');
 
   // Parse agent-supplied information (ASI). Must be valid JSON; otherwise
   // we surface as a warning on the report instead of swallowing it.
@@ -265,6 +272,64 @@ async function main() {
     process.exit(1);
   }
   const filesTouched = Array.from(new Set(normalized.map((op) => op.path).filter(Boolean)));
+
+  // Mode gate (pre-apply): simplify and docs proposals must clear their
+  // language-specific rules before anything touches disk.
+  let simplifyBaseline = null;
+  if (requireSimplify) {
+    const simplifyEngine = loadSimplifyEngine();
+    const gate = simplifyEngine.validateSimplifyProposal(proposal, cwd);
+    if (!gate.ok) {
+      printReport({
+        applied: false,
+        validated: false,
+        rolledBack: false,
+        operationCount: normalized.length,
+        validationExitCode: null,
+        validationElapsedMs: null,
+        error: gate.reason,
+        errorCode: 'SIMPLIFY_GATE_FAIL',
+        simplifyGate: gate,
+        asi: null,
+        asiWarning,
+        rollbackErrors: null,
+        filesTouched,
+      });
+      process.exit(1);
+    }
+    // Capture baseline metrics for the touched files.
+    simplifyBaseline = { perFile: {}, total: { sloc: 0, cyclomatic: 0, exports: 0 } };
+    for (const rel of filesTouched) {
+      const abs = path.resolve(cwd, rel);
+      const metric = simplifyEngine.measureComplexity(abs);
+      simplifyBaseline.perFile[rel] = metric;
+      simplifyBaseline.total.sloc += metric.sloc;
+      simplifyBaseline.total.cyclomatic += metric.cyclomatic;
+      simplifyBaseline.total.exports += metric.exports;
+    }
+  }
+  if (requireDocs) {
+    const docsEngine = loadDocsEngine();
+    const gate = docsEngine.validateDocsProposal(proposal);
+    if (!gate.ok) {
+      printReport({
+        applied: false,
+        validated: false,
+        rolledBack: false,
+        operationCount: normalized.length,
+        validationExitCode: null,
+        validationElapsedMs: null,
+        error: gate.reason,
+        errorCode: 'DOCS_GATE_FAIL',
+        docsGate: gate,
+        asi: null,
+        asiWarning,
+        rollbackErrors: null,
+        filesTouched,
+      });
+      process.exit(1);
+    }
+  }
 
   // Apply the changeSet.
   let handle;
@@ -340,6 +405,60 @@ async function main() {
     process.exit(2);
   }
 
+  // Post-apply metric gate (simplify only). If the change didn't
+  // actually reduce complexity, roll back even though tests passed —
+  // that's the whole point of simplify.
+  let simplifyVerdict = null;
+  if (requireSimplify && simplifyBaseline) {
+    const simplifyEngine = loadSimplifyEngine();
+    const after = { perFile: {}, total: { sloc: 0, cyclomatic: 0, exports: 0 } };
+    for (const rel of filesTouched) {
+      const abs = path.resolve(cwd, rel);
+      const metric = simplifyEngine.measureComplexity(abs);
+      after.perFile[rel] = metric;
+      after.total.sloc += metric.sloc;
+      after.total.cyclomatic += metric.cyclomatic;
+      after.total.exports += metric.exports;
+    }
+    simplifyVerdict = simplifyEngine.verifyMetricImprovement(
+      simplifyBaseline.total,
+      after.total
+    );
+    if (!simplifyVerdict.ok) {
+      let rollbackErrors = null;
+      try {
+        const rollbackResult = rollbackAppliedChangeSet(handle);
+        rollbackErrors = Array.isArray(rollbackResult) && rollbackResult.length > 0
+          ? rollbackResult
+          : null;
+      } catch (rollbackErr) {
+        rollbackErrors = [{
+          path: null,
+          action: 'rollback',
+          error: rollbackErr.message || String(rollbackErr),
+        }];
+      }
+      printReport({
+        applied: true,
+        validated: validation ? validation.passed : null,
+        rolledBack: true,
+        operationCount: normalized.length,
+        validationExitCode: validation ? validation.exitCode : null,
+        validationElapsedMs: validation ? validation.elapsedMs : null,
+        simplifyVerdict,
+        simplifyBaseline: simplifyBaseline.total,
+        simplifyAfter: after.total,
+        asi,
+        asiWarning,
+        error: simplifyVerdict.reason,
+        errorCode: 'SIMPLIFY_METRIC_REGRESSED',
+        rollbackErrors,
+        filesTouched,
+      });
+      process.exit(2);
+    }
+  }
+
   printReport({
     applied: true,
     validated: validation ? validation.passed : null,
@@ -350,6 +469,8 @@ async function main() {
     benchmarkMetrics: benchmark ? benchmark.metrics : null,
     benchmarkExitCode: benchmark ? benchmark.exitCode : null,
     benchmarkElapsedMs: benchmark ? benchmark.elapsedMs : null,
+    simplifyVerdict,
+    simplifyBaseline: simplifyBaseline ? simplifyBaseline.total : null,
     asi,
     asiWarning,
     error: null,

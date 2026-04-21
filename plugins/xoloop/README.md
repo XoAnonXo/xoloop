@@ -1,48 +1,79 @@
 # XOLoop — Claude Code Plugin
 
 Subagent-driven code improvement framework for Claude Code. Install once;
-every Claude Code session in any repo gains 9 iterative modes that use
+every Claude Code session in any repo gains 11 iterative modes that use
 **Agent subagents as the default proposer**.
 
 **No API key required for the default path.** The proposer IS the Claude
 subagent you spawn — no separate Anthropic/OpenAI account needed. API-key
 mode exists as an EXTRA for CI / headless / true-overnight runs.
 
-## v0.2.0 — what's new
+## v0.3.0 — what's new
 
-- **Session persistence** — `.xoloop/session.md` + `.xoloop/session.jsonl`
-  + `.xoloop/ideas.md` survive context resets. A fresh subagent reads
-  these and resumes where the last session left off. Inspired by
+- **`xo-simplify`** — new deletion-focused mode (8 rounds default).
+  Each round spawns a subagent proposing ONE deletion; bridge enforces
+  three gates: no test-file edits, no exported-symbol deletions
+  (AST-lite scan), and a post-apply metric gate requiring ≥1 of
+  {sloc, cyclomatic, exports} to decrease AND none to increase.
+- **`xo-docs`** — new documentation-generation mode (3 fixed rounds:
+  generate + polish + polish). Scans public API surface + tests +
+  existing docs, only edits docblock regions in source files,
+  creates/updates README and CHANGELOG freely.
+- **11-phase overnight pipeline** — budget bumped from 50 → 80 to
+  accommodate new phases. Pipeline:
+  `build → simplify → polish → fuzz → bench → improve → autoresearch →
+  polish → audit → polish → docs`.
+- **1.5× rounds across the board** — polish 7→11, audit 7→11, improve
+  7→11, autoresearch 5→8, build 2→3, plus new simplify (8) and docs (3),
+  based on saturation data from v0.2.0 runs. Stop-early still protects
+  against wasted budget.
+- **Bridge gates `--require-simplify` and `--require-docs`** — pre-apply
+  validation + simplify post-apply metric verification, enforced at the
+  bridge layer so API-key EXTRA wrappers get the same safety.
+
+## v0.2.0 — recap
+
+- Session persistence (`.xoloop/session.md` + `session.jsonl` +
+  `ideas.md`) survives context resets. Inspired by
   [pi-autoresearch](https://github.com/davebcn87/pi-autoresearch).
-- **`xo-finalize`** — new 9th mode. Turns a noisy session into clean
-  reviewable branches, one per logical change, from the merge-base.
-- **MAD-based confidence score** in `xo-improve` — noise-aware
-  improvement scoring (green/yellow/red) replaces the fixed 3%
-  threshold. Works well with flaky benchmarks, ML training loss, etc.
-- **ASI (Agent-Supplied Information)** — `--asi <json>` on every apply;
-  the subagent's "what I learned, why it failed, what to try next"
-  survives rollbacks.
-- **Simpler benchmark contract** — `xoloop-benchmark run --script <bash>`
-  parses `METRIC name=value` lines (pi-autoresearch style) alongside
-  the SHA-256-locked yaml mode.
-- **Security hardening** — TOCTOU-free symlink refusal (O_NOFOLLOW),
-  markdown injection sanitization, opt-in gates for all auto-exec
-  phases (benchmark, fuzz, directive).
-- 19 findings closed across 5 audit rounds on the new modules.
+- `xo-finalize` — turns a noisy session into clean reviewable branches.
+- MAD-based confidence score in `xo-improve`.
+- ASI (Agent-Supplied Information) on every apply.
+- Simpler benchmark contract: `METRIC name=value` lines.
+- Security hardening: TOCTOU-free symlink refusal (O_NOFOLLOW), opt-in
+  auto-exec gates, markdown injection sanitization.
 
-## The 9 modes
+## The 11 modes
 
 | Mode | Default iterations | Trigger phrases | What it does |
 |---|---|---|---|
-| **xo-build** | 2 (spec + impl) | "build new…", "implement…", "scaffold…" | Two-subagent TDD: Agent A writes failing tests, Agent B writes implementation |
-| **xo-polish** | 7 | "polish…", "refine…", "clean up…", "tighten…" | Subagent proposes refinement → bridge applies atomically → tests gate → keep or rollback |
-| **xo-fuzz** | deterministic | "fuzz…", "property-test…", "find edge cases…" | fast-check property fuzzing (no LLM, no API) |
-| **xo-benchmark** | deterministic | "benchmark…", "lock output…" | SHA-256-locked deterministic tests + simpler `--script` contract with `METRIC name=value` lines |
-| **xo-improve** | 7 | "make X faster", "reduce memory…", "hit this benchmark" | Benchmark-driven optimization with MAD-based noise-aware confidence score |
-| **xo-audit** | 7 | "audit…", "find bugs in…", "security review…" | Auditor subagent finds P1/P2/P3 findings; fixer subagents one-per-blocking, bridge-gated |
-| **xo-autoresearch** | 5 | "research alternatives to…", "is there a better way…" | Champion vs Challenger subagent tournament with judge subagent scoring on 1-5 rubric |
-| **xo-overnight** | 50 | "run overnight", "full XO pipeline" | Chained orchestrator across phases, budget-managed |
+| **xo-build** | 3 (spec + impl + refactor) | "build new…", "implement…", "scaffold…" | Subagent TDD: failing tests first, implementation second, light refactor third |
+| **xo-simplify** ⭐ | 8 | "simplify…", "shrink…", "remove dead code…", "collapse this wrapper…" | Deletion-focused subagent loop. Metric-gated (sloc/cyclomatic/exports must decrease, none increase). Internal symbols only — never tests, never public API. |
+| **xo-polish** | 11 | "polish…", "refine…", "clean up…", "tighten…" | Refinement subagent loop → bridge applies atomically → tests gate → keep or rollback |
+| **xo-fuzz** | deterministic (150 trials) | "fuzz…", "property-test…", "find edge cases…" | fast-check property fuzzing (no LLM, no API) |
+| **xo-benchmark** | deterministic (8 samples) | "benchmark…", "lock output…" | SHA-256-locked deterministic tests + `METRIC name=value` script contract |
+| **xo-improve** | 11 | "make X faster", "reduce memory…", "hit this benchmark" | Benchmark-driven optimization with MAD-based noise-aware confidence score |
+| **xo-autoresearch** | 8 | "research alternatives to…", "is there a better way…" | Champion-vs-Challenger subagent tournament with judge subagent scoring on 1-5 rubric |
+| **xo-audit** | 11 | "audit…", "find bugs in…", "security review…" | Auditor subagent finds P1/P2/P3 findings; fixer subagents one-per-blocking, bridge-gated |
+| **xo-docs** ⭐ | 3 (generate + polish + polish) | "generate docs…", "update README…", "add JSDoc…" | Scans public API surface + tests + existing docs. Source files: docblock edits only. Doc files: free rein. |
+| **xo-overnight** | 80 | "run overnight", "full XO pipeline" | 11-phase orchestrator across build→simplify→polish→fuzz→bench→improve→autoresearch→polish→audit→polish→docs |
 | **xo-finalize** | n/a | "finalize…", "split into PRs", "turn run into branches" | Group kept proposals by non-overlapping file sets, create independent reviewable branches from merge-base |
+
+## The full pipeline (overnight)
+
+```
+build (3) → simplify (8) → polish (11) → fuzz (det) → bench (det) →
+improve (11) → autoresearch (8) → polish (8) → audit (11) →
+polish (5) → docs (3)
+
+= 68 LLM rounds + deterministic phases. Fits 80 budget with 12 headroom.
+```
+
+**Why this ordering:**
+- `simplify` before `polish` → don't beautify dead code
+- `polish` appears 3×: after simplify skeletons, after improve scars, after audit fixes
+- `audit` late → finds real bugs in mature code, not draft bugs
+- `docs` last → docs describe the final API, not the draft API
 
 ## Why subagent-default / API-key-extra
 
