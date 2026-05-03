@@ -89,7 +89,66 @@ function parseTestOutput(text) {
  * Note: `node --test` exits with code 1 when any test fails, so we cannot use
  * the exit code alone to determine pass/fail counts — we must parse the output.
  */
-function runTestsInDir(testPaths, cwd) {
+function normalizeCommandLabel(command) {
+  if (typeof command === 'string') return command.trim();
+  if (command && Array.isArray(command.argv)) return command.argv.join(' ');
+  return '';
+}
+
+function runCommandBackedTests(command, cwd) {
+  const label = normalizeCommandLabel(command);
+  if (!label) {
+    throw new AdapterError(
+      'DELTA_TEST_COMMAND_REQUIRED',
+      'testCommand',
+      'testCommand must be a non-empty shell string or argv object',
+      { fixHint: 'Pass a language-native test command such as { argv: ["python3", "-m", "pytest", "tests/test_example.py"] }.' },
+    );
+  }
+
+  const childEnv = { ...process.env };
+  delete childEnv.NODE_TEST_CONTEXT;
+  delete childEnv.NODE_CHANNEL_FD;
+
+  let result;
+  if (command && Array.isArray(command.argv)) {
+    const argv = command.argv
+      .map((token) => (typeof token === 'string' ? token : String(token || '')).trim())
+      .filter(Boolean);
+    const [program, ...args] = argv;
+    result = spawnSync(program, args, {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 10 * 1024 * 1024,
+      env: childEnv,
+    });
+  } else {
+    result = spawnSync('bash', ['-lc', String(command)], {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 10 * 1024 * 1024,
+      env: childEnv,
+    });
+  }
+
+  const exitCode = result.status === null ? 1 : result.status;
+  const combined = [
+    `$ ${label}`,
+    result.stdout || '',
+    result.stderr || '',
+  ].join('\n').trim();
+
+  return {
+    total: 1,
+    passed: exitCode === 0 ? 1 : 0,
+    failed: exitCode === 0 ? 0 : 1,
+    output: combined,
+  };
+}
+
+function runTestsInDir(testPaths, cwd, options = {}) {
   if (!testPaths || !Array.isArray(testPaths) || testPaths.length === 0) {
     return { total: 0, passed: 0, failed: 0, output: '' };
   }
@@ -101,6 +160,10 @@ function runTestsInDir(testPaths, cwd) {
       'cwd must be a non-empty string directory path',
       { fixHint: 'Pass the absolute path to the working directory for test execution.' },
     );
+  }
+
+  if (options && options.testCommand) {
+    return runCommandBackedTests(options.testCommand, cwd);
   }
 
   // Strip NODE_TEST_CONTEXT and NODE_CHANNEL_FD from the environment.
@@ -237,7 +300,7 @@ function validateRedGreenDelta(opts = {}) {
       { fixHint: 'Pass an options object: { baseDir, candidateDir, testPaths, fullValidation }.' },
     );
   }
-  const { baseDir, candidateDir, testPaths, fullValidation } = opts;
+  const { baseDir, candidateDir, testPaths, fullValidation, testCommand } = opts;
   if (!baseDir || typeof baseDir !== 'string') {
     throw new AdapterError(
       'DELTA_BASE_DIR_REQUIRED',
@@ -268,7 +331,7 @@ function validateRedGreenDelta(opts = {}) {
   // ------------------------------------------------------------------
   // Phase 1 — RED: new tests must ALL FAIL on base (no implementation)
   // ------------------------------------------------------------------
-  const redResult = runTestsInDir(testPaths, baseDir);
+  const redResult = runTestsInDir(testPaths, baseDir, { testCommand });
 
   if (redResult.passed > 0) {
     return {
@@ -283,7 +346,7 @@ function validateRedGreenDelta(opts = {}) {
   // ------------------------------------------------------------------
   // Phase 2 — GREEN: new tests must ALL PASS on candidate (with implementation)
   // ------------------------------------------------------------------
-  const greenResult = runTestsInDir(testPaths, candidateDir);
+  const greenResult = runTestsInDir(testPaths, candidateDir, { testCommand });
 
   if (greenResult.failed > 0) {
     return {
@@ -323,4 +386,5 @@ module.exports = {
   validateRedGreenDelta,
   runTestsInDir,
   runValidationInDir,
+  runCommandBackedTests,
 };

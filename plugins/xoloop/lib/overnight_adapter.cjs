@@ -433,6 +433,17 @@ function buildStarterAdapter(repoRoot) {
     pyprojectToml: path.join(safeRoot, 'pyproject.toml'),
     cargoToml: path.join(safeRoot, 'Cargo.toml'),
     goMod: path.join(safeRoot, 'go.mod'),
+    gemfile: path.join(safeRoot, 'Gemfile'),
+    pomXml: path.join(safeRoot, 'pom.xml'),
+    buildGradle: path.join(safeRoot, 'build.gradle'),
+    buildGradleKts: path.join(safeRoot, 'build.gradle.kts'),
+    settingsGradle: path.join(safeRoot, 'settings.gradle'),
+    settingsGradleKts: path.join(safeRoot, 'settings.gradle.kts'),
+    packageSwift: path.join(safeRoot, 'Package.swift'),
+    cmakeLists: path.join(safeRoot, 'CMakeLists.txt'),
+    makefile: path.join(safeRoot, 'Makefile'),
+    mesonBuild: path.join(safeRoot, 'meson.build'),
+    bazelBuild: path.join(safeRoot, 'BUILD.bazel'),
   };
   const requirementsFiles = files.filter((entry) => /^requirements[^/]*\.txt$/i.test(entry));
   const packageJson = fs.existsSync(manifestPaths.packageJson)
@@ -441,6 +452,17 @@ function buildStarterAdapter(repoRoot) {
   const hasPyproject = fs.existsSync(manifestPaths.pyprojectToml);
   const hasCargo = fs.existsSync(manifestPaths.cargoToml);
   const hasGo = fs.existsSync(manifestPaths.goMod);
+  const hasGemfile = fs.existsSync(manifestPaths.gemfile);
+  const hasPom = fs.existsSync(manifestPaths.pomXml);
+  const hasGradle = fs.existsSync(manifestPaths.buildGradle) || fs.existsSync(manifestPaths.buildGradleKts) || fs.existsSync(manifestPaths.settingsGradle) || fs.existsSync(manifestPaths.settingsGradleKts);
+  const hasSwiftPackage = fs.existsSync(manifestPaths.packageSwift);
+  const hasCmake = fs.existsSync(manifestPaths.cmakeLists);
+  const hasMakefile = fs.existsSync(manifestPaths.makefile);
+  const hasMeson = fs.existsSync(manifestPaths.mesonBuild);
+  const hasBazel = fs.existsSync(manifestPaths.bazelBuild);
+  const gemspecFiles = files.filter((entry) => /^[^/]+\.gemspec$/i.test(entry));
+  const dotnetProjects = files.filter((entry) => /\.(csproj|sln)$/i.test(entry));
+  const xcodeProjects = files.filter((entry) => /\.(xcodeproj|xcworkspace)$/i.test(entry));
 
   const fileExtensions = new Set(
     files
@@ -460,6 +482,27 @@ function buildStarterAdapter(repoRoot) {
   if (hasGo || ['.go'].some((entry) => fileExtensions.has(entry))) {
     languageHints.push('go');
   }
+  if (hasGemfile || gemspecFiles.length > 0 || ['.rb'].some((entry) => fileExtensions.has(entry))) {
+    languageHints.push('ruby');
+  }
+  if (hasPom || hasGradle || ['.java'].some((entry) => fileExtensions.has(entry))) {
+    languageHints.push('java');
+  }
+  if (hasGradle || ['.kt', '.kts'].some((entry) => fileExtensions.has(entry))) {
+    languageHints.push('kotlin');
+  }
+  if (dotnetProjects.length > 0 || ['.cs'].some((entry) => fileExtensions.has(entry))) {
+    languageHints.push('csharp');
+  }
+  if (hasSwiftPackage || xcodeProjects.length > 0 || ['.swift'].some((entry) => fileExtensions.has(entry))) {
+    languageHints.push('swift');
+  }
+  if (hasCmake || hasMakefile || hasMeson || hasBazel || ['.c', '.h'].some((entry) => fileExtensions.has(entry))) {
+    languageHints.push('c');
+  }
+  if (hasCmake || hasMakefile || hasMeson || hasBazel || ['.cc', '.cpp', '.cxx', '.hpp', '.hh'].some((entry) => fileExtensions.has(entry))) {
+    languageHints.push('cpp');
+  }
 
   const sourceDirs = Array.from(new Set(
     files
@@ -477,6 +520,8 @@ function buildStarterAdapter(repoRoot) {
     'internal',
     'cmd',
     'crates',
+    'Sources',
+    'Tests',
     'server',
     'client',
   ].includes(entry)).concat(sourceDirs.filter((entry) => ![
@@ -498,12 +543,12 @@ function buildStarterAdapter(repoRoot) {
   )).sort();
 
   const sourcePatterns = uniqueSourceDirs.map((entry) => `${entry}/**`);
-  const explicitRootSources = files.filter((entry) => !entry.includes('/') && /\.(js|cjs|mjs|ts|tsx|py|go|rs)$/i.test(entry));
+  const explicitRootSources = files.filter((entry) => !entry.includes('/') && /\.(js|cjs|mjs|ts|tsx|py|go|rs|rb|java|kt|kts|cs|swift|c|h|cc|cpp|cxx|hpp|hh)$/i.test(entry));
   explicitRootSources.forEach((entry) => sourcePatterns.push(entry));
 
   const testPatterns = uniqueTestDirs.map((entry) => `${entry}/**`);
   files
-    .filter((entry) => /\.(test|spec)\.[^.]+$/i.test(entry) || /_test\.go$/i.test(entry))
+    .filter((entry) => /\.(test|spec)\.[^.]+$/i.test(entry) || /_test\.(go|c|cc|cpp|cxx)$/i.test(entry) || /Tests?\.(cs|swift)$/i.test(entry))
     .forEach((entry) => {
       if (!testPatterns.includes(entry)) {
         testPatterns.push(entry);
@@ -515,6 +560,20 @@ function buildStarterAdapter(repoRoot) {
     hasPyproject ? 'pyproject.toml' : null,
     hasCargo ? 'Cargo.toml' : null,
     hasGo ? 'go.mod' : null,
+    hasGemfile ? 'Gemfile' : null,
+    gemspecFiles[0] || null,
+    hasPom ? 'pom.xml' : null,
+    fs.existsSync(manifestPaths.buildGradle) ? 'build.gradle' : null,
+    fs.existsSync(manifestPaths.buildGradleKts) ? 'build.gradle.kts' : null,
+    fs.existsSync(manifestPaths.settingsGradle) ? 'settings.gradle' : null,
+    fs.existsSync(manifestPaths.settingsGradleKts) ? 'settings.gradle.kts' : null,
+    dotnetProjects[0] || null,
+    hasSwiftPackage ? 'Package.swift' : null,
+    xcodeProjects[0] || null,
+    hasCmake ? 'CMakeLists.txt' : null,
+    hasMakefile ? 'Makefile' : null,
+    hasMeson ? 'meson.build' : null,
+    hasBazel ? 'BUILD.bazel' : null,
   ].filter(Boolean);
 
   const manualOnlyPaths = [
@@ -542,6 +601,18 @@ function buildStarterAdapter(repoRoot) {
   }
   if (files.includes('rustfmt.toml')) {
     formattingHints.push('rustfmt');
+  }
+  if (files.includes('.rubocop.yml') || files.includes('.rubocop.yaml')) {
+    formattingHints.push('rubocop');
+  }
+  if (files.includes('.editorconfig')) {
+    formattingHints.push('editorconfig');
+  }
+  if (files.includes('.clang-format')) {
+    formattingHints.push('clang-format');
+  }
+  if (files.includes('gradlew')) {
+    formattingHints.push('gradle-wrapper');
   }
 
   let setup = 'echo "Replace repo.setup with the real bootstrap command" >&2 && exit 1';
@@ -580,6 +651,52 @@ function buildStarterAdapter(repoRoot) {
     setup = 'go mod download';
     baselineValidation = ['go test ./...'];
     finalValidation = ['go test ./...'];
+  } else if (hasGemfile || gemspecFiles.length > 0) {
+    setup = 'bundle install';
+    if (uniqueTestDirs.includes('spec')) {
+      baselineValidation = ['bundle exec rspec'];
+      finalValidation = ['bundle exec rspec'];
+    } else {
+      baselineValidation = ['bundle exec rake test'];
+      finalValidation = ['bundle exec rake test'];
+    }
+  } else if (hasPom) {
+    setup = 'mvn -q -DskipTests dependency:resolve';
+    baselineValidation = ['mvn test'];
+    finalValidation = ['mvn test'];
+  } else if (hasGradle) {
+    setup = files.includes('gradlew') ? './gradlew dependencies' : 'gradle dependencies';
+    const gradleCmd = files.includes('gradlew') ? './gradlew test' : 'gradle test';
+    baselineValidation = [gradleCmd];
+    finalValidation = [gradleCmd];
+  } else if (dotnetProjects.length > 0) {
+    setup = 'dotnet restore';
+    baselineValidation = ['dotnet build', 'dotnet test'];
+    finalValidation = ['dotnet build', 'dotnet test'];
+  } else if (hasSwiftPackage) {
+    setup = 'swift package resolve';
+    baselineValidation = ['swift test'];
+    finalValidation = ['swift test'];
+  } else if (xcodeProjects.length > 0) {
+    setup = 'xcodebuild -list';
+    baselineValidation = ['xcodebuild test'];
+    finalValidation = ['xcodebuild test'];
+  } else if (hasCmake) {
+    setup = 'cmake -S . -B build';
+    baselineValidation = ['cmake --build build', 'ctest --test-dir build --output-on-failure'];
+    finalValidation = ['cmake --build build', 'ctest --test-dir build --output-on-failure'];
+  } else if (hasMeson) {
+    setup = 'meson setup build';
+    baselineValidation = ['meson test -C build'];
+    finalValidation = ['meson test -C build'];
+  } else if (hasBazel) {
+    setup = 'bazel fetch //...';
+    baselineValidation = ['bazel test //...'];
+    finalValidation = ['bazel test //...'];
+  } else if (hasMakefile) {
+    setup = 'make';
+    baselineValidation = ['make test'];
+    finalValidation = ['make test'];
   }
 
   return {
@@ -647,6 +764,20 @@ function buildStarterAdapter(repoRoot) {
           requirementsFiles[0] || null,
           hasCargo ? 'Cargo.toml' : null,
           hasGo ? 'go.mod' : null,
+          hasGemfile ? 'Gemfile' : null,
+          gemspecFiles[0] || null,
+          hasPom ? 'pom.xml' : null,
+          fs.existsSync(manifestPaths.buildGradle) ? 'build.gradle' : null,
+          fs.existsSync(manifestPaths.buildGradleKts) ? 'build.gradle.kts' : null,
+          fs.existsSync(manifestPaths.settingsGradle) ? 'settings.gradle' : null,
+          fs.existsSync(manifestPaths.settingsGradleKts) ? 'settings.gradle.kts' : null,
+          dotnetProjects[0] || null,
+          hasSwiftPackage ? 'Package.swift' : null,
+          xcodeProjects[0] || null,
+          hasCmake ? 'CMakeLists.txt' : null,
+          hasMakefile ? 'Makefile' : null,
+          hasMeson ? 'meson.build' : null,
+          hasBazel ? 'BUILD.bazel' : null,
         ].filter(Boolean),
       },
     },

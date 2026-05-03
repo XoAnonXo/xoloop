@@ -2,7 +2,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const { normalizeSimulationLock } = require('../../benchmarks/lib/simulation_world.cjs');
+let normalizeSimulationLock;
+try {
+  ({ normalizeSimulationLock } = require('../../benchmarks/lib/simulation_world.cjs'));
+} catch (_) {
+  normalizeSimulationLock = (value) => value;
+}
 const { applyChangeSet, rollbackAppliedChangeSet } = require('./change_set_engine.cjs');
 const { DEFAULT_MINIMAX_API_KEY_ENV } = require('./minimax_client.cjs');
 const { callModel } = require('./model_router.cjs');
@@ -806,6 +811,20 @@ function commitAcceptedIteration(options = {}) {
 }
 
 async function loadModelProposal(options) {
+  if (options.liveAgentProvider && typeof options.liveAgentProvider.call === 'function') {
+    return options.liveAgentProvider.call({
+      mode: 'autoresearch',
+      role: 'proposer',
+      language: options.language || (options.context && options.context.language) || null,
+      requestKind: 'proposal',
+      prompt: options.prompt,
+      context: {
+        cwd: options.cwd,
+        tokenBudget: options.tokenBudget || null,
+      },
+      schema: { type: 'json_object' },
+    });
+  }
   if (typeof options.modelLoader === 'function') {
     return options.modelLoader(options);
   }
@@ -961,6 +980,8 @@ async function runAutoresearchLoop(options = {}) {
         mockResponsePath: options.mockResponsePath,
         prompt,
         modelConfig: config.model,
+        liveAgentProvider: options.liveAgentProvider,
+        language: options.language,
         modelLoader: options.modelLoader,
         tokenBudget,
       });
@@ -1280,6 +1301,7 @@ module.exports = {
   extractFirstJsonObject,
   getWorkingTreeState,
   loadResearchConfig,
+  loadModelProposal,
   parseResearchProposal,
   buildBaselineChampion,
   buildInvalidProposalFallback,

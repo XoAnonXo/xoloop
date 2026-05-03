@@ -24,6 +24,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const { scanExports, detectLanguage } = require('./xo_simplify_engine.cjs');
 
 const DOC_FILE_PATTERNS = [
@@ -33,7 +34,7 @@ const DOC_FILE_PATTERNS = [
   /^doc\/.*\.(md|rst|adoc)$/i,
 ];
 
-const SOURCE_EXTS = ['.js', '.cjs', '.mjs', '.ts', '.tsx', '.jsx', '.py', '.rb'];
+const SOURCE_EXTS = ['.js', '.cjs', '.mjs', '.ts', '.tsx', '.jsx', '.py', '.rb', '.go', '.rs', '.java', '.kt', '.kts', '.cs', '.swift', '.c', '.h', '.cc', '.cpp', '.cxx', '.hpp', '.hh'];
 
 const SKIP_DIRS = new Set([
   'node_modules', '.git', 'dist', 'build', 'coverage', '.next',
@@ -119,6 +120,57 @@ function inferKind(source, name, language) {
     if (new RegExp(`^(?:async\\s+)?def\\s+${name}\\b`, 'm').test(source)) return 'function';
     return 'symbol';
   }
+  if (language === 'ruby') {
+    if (new RegExp(`^class\\s+${name}\\b`, 'm').test(source)) return 'class';
+    if (new RegExp(`^module\\s+${name}\\b`, 'm').test(source)) return 'module';
+    if (new RegExp(`^def\\s+(?:self\\.)?${name}\\b`, 'm').test(source)) return 'function';
+    return 'symbol';
+  }
+  if (language === 'go') {
+    if (new RegExp(`^func\\s+(?:\\([^)]*\\)\\s*)?${name}\\s*\\(`, 'm').test(source)) return 'function';
+    if (new RegExp(`^type\\s+${name}\\s+struct\\b`, 'm').test(source)) return 'struct';
+    if (new RegExp(`^type\\s+${name}\\s+interface\\b`, 'm').test(source)) return 'interface';
+    if (new RegExp(`^type\\s+${name}\\b`, 'm').test(source)) return 'type';
+    if (new RegExp(`^(?:var|const)\\s+${name}\\b`, 'm').test(source)) return 'variable';
+    return 'symbol';
+  }
+  if (language === 'rust') {
+    if (new RegExp(`\\bpub\\s+(?:async\\s+)?fn\\s+${name}\\b`).test(source)) return 'function';
+    if (new RegExp(`\\bpub\\s+struct\\s+${name}\\b`).test(source)) return 'struct';
+    if (new RegExp(`\\bpub\\s+enum\\s+${name}\\b`).test(source)) return 'enum';
+    if (new RegExp(`\\bpub\\s+trait\\s+${name}\\b`).test(source)) return 'trait';
+    if (new RegExp(`\\bpub\\s+mod\\s+${name}\\b`).test(source)) return 'module';
+    return 'symbol';
+  }
+  if (language === 'java' || language === 'kotlin') {
+    if (new RegExp(`\\b(?:public\\s+)?(?:class|data\\s+class)\\s+${name}\\b`).test(source)) return 'class';
+    if (new RegExp(`\\b(?:public\\s+)?interface\\s+${name}\\b`).test(source)) return 'interface';
+    if (new RegExp(`\\b(?:public\\s+)?(?:enum\\s+class|enum)\\s+${name}\\b`).test(source)) return 'enum';
+    if (new RegExp(`\\b(?:public\\s+)?(?:fun|[A-Za-z_][\\w<>, ?\\[\\]]+)\\s+${name}\\s*\\(`).test(source)) return 'function';
+    return 'symbol';
+  }
+  if (language === 'csharp') {
+    if (new RegExp(`\\bpublic\\s+(?:class|record)\\s+${name}\\b`).test(source)) return 'class';
+    if (new RegExp(`\\bpublic\\s+interface\\s+${name}\\b`).test(source)) return 'interface';
+    if (new RegExp(`\\bpublic\\s+struct\\s+${name}\\b`).test(source)) return 'struct';
+    if (new RegExp(`\\bpublic\\s+enum\\s+${name}\\b`).test(source)) return 'enum';
+    if (new RegExp(`\\bpublic\\s+(?:static\\s+)?(?:async\\s+)?[A-Za-z_][\\w<>, ?\\[\\]]*\\s+${name}\\s*\\(`).test(source)) return 'function';
+    return 'symbol';
+  }
+  if (language === 'swift') {
+    if (new RegExp(`\\b(?:public|open)\\s+(?:final\\s+)?class\\s+${name}\\b`).test(source)) return 'class';
+    if (new RegExp(`\\b(?:public|open)\\s+struct\\s+${name}\\b`).test(source)) return 'struct';
+    if (new RegExp(`\\b(?:public|open)\\s+enum\\s+${name}\\b`).test(source)) return 'enum';
+    if (new RegExp(`\\b(?:public|open)\\s+protocol\\s+${name}\\b`).test(source)) return 'protocol';
+    if (new RegExp(`\\b(?:public|open)\\s+(?:static\\s+)?func\\s+${name}\\s*\\(`).test(source)) return 'function';
+    return 'symbol';
+  }
+  if (language === 'c' || language === 'cpp') {
+    if (new RegExp(`\\b(?:class|struct)\\s+${name}\\b`).test(source)) return language === 'cpp' ? 'class' : 'struct';
+    if (new RegExp(`\\b(?:enum)\\s+${name}\\b`).test(source)) return 'enum';
+    if (new RegExp(`\\b${name}\\s*\\(`).test(source)) return 'function';
+    return 'symbol';
+  }
   return 'symbol';
 }
 
@@ -134,12 +186,123 @@ function findExistingDoc(source, name, language) {
     return m ? m[1].trim() : null;
   }
   if (language === 'python') {
-    // Def / class with a """...""" immediately after the signature
+    const astDoc = findPythonDocWithAst(source, name);
+    if (astDoc !== undefined) return astDoc;
     const re = new RegExp(`^(?:async\\s+)?(?:def|class)\\s+${name}\\b[^:]*:[\\s\\r\\n]*"""([\\s\\S]*?)"""`, 'm');
     const m = source.match(re);
     return m ? m[1].trim() : null;
   }
+  if (language === 'ruby') {
+    const ripperDoc = findRubyDocWithRipper(source, name);
+    if (ripperDoc !== undefined) return ripperDoc;
+    const re = new RegExp(`((?:^\\s*#.*\\n)+)\\s*(?:class|module|def\\s+(?:self\\.)?)${name}\\b`, 'm');
+    const m = source.match(re);
+    return m ? m[1].replace(/^\s*#\s?/gm, '').trim() : null;
+  }
+  if (language === 'go') {
+    const re = new RegExp(`((?:^//\\s*.*\\n)+)(?:func\\s+(?:\\([^)]*\\)\\s*)?|type\\s+|var\\s+|const\\s+)${name}\\b`, 'm');
+    const m = source.match(re);
+    return m ? m[1].replace(/^\/\/\s?/gm, '').trim() : null;
+  }
+  if (language === 'rust') {
+    const re = new RegExp(`((?:^\\s*///\\s*.*\\n)+)\\s*pub\\s+(?:async\\s+)?(?:fn|struct|enum|trait|type|const|static|mod)\\s+${name}\\b`, 'm');
+    const m = source.match(re);
+    return m ? m[1].replace(/^\s*\/\/\/\s?/gm, '').trim() : null;
+  }
+  if (language === 'java' || language === 'kotlin' || language === 'csharp' || language === 'swift' || language === 'c' || language === 'cpp') {
+    return findLeadingBlockDoc(source, name);
+  }
   return null;
+}
+
+function findLeadingBlockDoc(source, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const symbolLine = new RegExp(`\\b${escaped}\\b`);
+  const lines = source.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (!symbolLine.test(line)) continue;
+    if (/^\s*(?:\/|\*)/.test(line)) continue;
+    if (!/[({]/.test(line)) continue;
+
+    let cursor = i - 1;
+    while (cursor >= 0 && lines[cursor].trim() === '') cursor -= 1;
+    if (cursor < 0) return null;
+
+    if (/^\s*\/\/\//.test(lines[cursor])) {
+      const docLines = [];
+      while (cursor >= 0 && /^\s*\/\/\//.test(lines[cursor])) {
+        docLines.unshift(lines[cursor].replace(/^\s*\/\/\/\s?/, ''));
+        cursor -= 1;
+      }
+      return docLines.join('\n').trim() || null;
+    }
+
+    if (/^\s*\*\//.test(lines[cursor])) {
+      const docLines = [];
+      cursor -= 1;
+      while (cursor >= 0 && !/^\s*\/\*\*/.test(lines[cursor])) {
+        docLines.unshift(lines[cursor].replace(/^\s*\*\s?/, ''));
+        cursor -= 1;
+      }
+      if (cursor >= 0) {
+        const first = lines[cursor].replace(/^\s*\/\*\*\s?/, '').replace(/\*\/\s*$/, '');
+        if (first.trim()) docLines.unshift(first);
+      }
+      return docLines.join('\n').trim() || null;
+    }
+  }
+  return null;
+}
+
+function findPythonDocWithAst(source, name) {
+  const script = [
+    'import ast, json, sys',
+    'source = sys.stdin.read()',
+    'name = sys.argv[1]',
+    'tree = ast.parse(source)',
+    'docs = {}',
+    'for node in tree.body:',
+    '    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):',
+    '        docs[node.name] = ast.get_docstring(node)',
+    'print(json.dumps(docs.get(name)))',
+  ].join('\n');
+  const result = spawnSync('python3', ['-c', script, name], {
+    input: source,
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.status !== 0) return undefined;
+  try {
+    return JSON.parse(result.stdout || 'null');
+  } catch (_err) {
+    return undefined;
+  }
+}
+
+function findRubyDocWithRipper(source, name) {
+  // Ripper gives stable line numbers; use those to collect the contiguous
+  // comment block immediately above the public definition.
+  const lines = source.split(/\r?\n/);
+  const definitionPatterns = [
+    new RegExp(`^\\s*def\\s+(?:self\\.)?${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`),
+    new RegExp(`^\\s*class\\s+${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`),
+    new RegExp(`^\\s*module\\s+${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`),
+  ];
+  const lineIndex = lines.findIndex((line) => definitionPatterns.some((re) => re.test(line)));
+  if (lineIndex < 0) return undefined;
+  const docs = [];
+  for (let i = lineIndex - 1; i >= 0; i -= 1) {
+    const line = lines[i];
+    if (/^\s*#/.test(line)) {
+      docs.unshift(line.replace(/^\s*#\s?/, ''));
+      continue;
+    }
+    if (line.trim() === '') continue;
+    break;
+  }
+  return docs.length > 0 ? docs.join('\n').trim() : null;
 }
 
 /**
@@ -213,4 +376,6 @@ module.exports = {
   extractPublicSymbols,
   validateDocsProposal,
   isDocblockEdit,
+  findPythonDocWithAst,
+  findRubyDocWithRipper,
 };

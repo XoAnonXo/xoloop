@@ -1,0 +1,38 @@
+repo:
+  name: java-rate-limiter
+  setup: mvn -q -DskipTests dependency:resolve
+  baseline_validation: &a1
+    - mvn test
+  final_validation: *a1
+surfaces:
+  - id: java
+    title: Java
+    description: Auto-detected surface for java
+    paths:
+      - src/main/java/**
+    test_paths:
+      - src/test/java/**
+    invariants:
+      - must maintain public API behavior
+      - must keep native JVM tests green
+    risk: guarded
+    required_test_kinds:
+      - regression
+    context_patterns: []
+    allowed_dependencies: []
+    forbidden_paths: []
+    quick_validation: *a1
+    full_validation: *a1
+manual_only_paths: []
+shared_paths: []
+defaults:
+  report_dir: reports/overnight
+  branch_prefix: codex/overnight
+  attempt_limit: 3
+  repair_turns: 2
+  proposal_mode: staged
+  proposer:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+  audit:
+    provider: auto

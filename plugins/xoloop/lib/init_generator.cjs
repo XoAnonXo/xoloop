@@ -54,6 +54,98 @@ function detectProjectType(repoRoot) {
     };
   }
 
+  if (hasFile('Gemfile') || fs.readdirSync(repoRoot).some((entry) => entry.endsWith('.gemspec'))) {
+    return {
+      type: 'ruby',
+      setup: 'bundle install',
+      validation: ['bundle exec rspec'],
+      languageHints: ['ruby'],
+    };
+  }
+
+  if (hasFile('pom.xml')) {
+    return {
+      type: 'java',
+      setup: 'mvn -q -DskipTests dependency:resolve',
+      validation: ['mvn test'],
+      languageHints: ['java'],
+    };
+  }
+
+  if (hasFile('build.gradle') || hasFile('settings.gradle') || hasFile('build.gradle.kts') || hasFile('settings.gradle.kts')) {
+    const usesKotlinDsl = hasFile('build.gradle.kts') || hasFile('settings.gradle.kts');
+    const gradle = hasFile('gradlew') ? './gradlew' : 'gradle';
+    return {
+      type: usesKotlinDsl ? 'kotlin' : 'java',
+      setup: `${gradle} dependencies`,
+      validation: [`${gradle} test`],
+      languageHints: usesKotlinDsl ? ['kotlin', 'java'] : ['java'],
+    };
+  }
+
+  if (fs.readdirSync(repoRoot).some((entry) => /\.(csproj|sln)$/i.test(entry))) {
+    return {
+      type: 'csharp',
+      setup: 'dotnet restore',
+      validation: ['dotnet build', 'dotnet test'],
+      languageHints: ['csharp'],
+    };
+  }
+
+  if (hasFile('Package.swift')) {
+    return {
+      type: 'swift',
+      setup: 'swift package resolve',
+      validation: ['swift test'],
+      languageHints: ['swift'],
+    };
+  }
+
+  if (fs.readdirSync(repoRoot).some((entry) => /\.(xcodeproj|xcworkspace)$/i.test(entry))) {
+    return {
+      type: 'swift',
+      setup: 'xcodebuild -list',
+      validation: ['xcodebuild test'],
+      languageHints: ['swift'],
+    };
+  }
+
+  if (hasFile('CMakeLists.txt')) {
+    return {
+      type: 'cpp',
+      setup: 'cmake -S . -B build',
+      validation: ['cmake --build build', 'ctest --test-dir build --output-on-failure'],
+      languageHints: ['c', 'cpp'],
+    };
+  }
+
+  if (hasFile('meson.build')) {
+    return {
+      type: 'cpp',
+      setup: 'meson setup build',
+      validation: ['meson test -C build'],
+      languageHints: ['c', 'cpp'],
+    };
+  }
+
+  if (hasFile('BUILD.bazel')) {
+    return {
+      type: 'cpp',
+      setup: 'bazel fetch //...',
+      validation: ['bazel test //...'],
+      languageHints: ['c', 'cpp'],
+    };
+  }
+
+  if (hasFile('Makefile')) {
+    return {
+      type: 'cpp',
+      setup: 'make',
+      validation: ['make test'],
+      languageHints: ['c', 'cpp'],
+    };
+  }
+
   return {
     type: 'unknown',
     setup: 'echo "No setup detected — replace this with your build command"',
@@ -138,6 +230,25 @@ function detectSurfaces(repoRoot, projectType) {
       });
     }
     return surfaces;
+  }
+
+  if (projectType.type === 'java' || projectType.type === 'kotlin') {
+    const sourceRoot = projectType.type === 'kotlin' && fs.existsSync(path.join(repoRoot, 'src/main/kotlin'))
+      ? 'src/main/kotlin'
+      : 'src/main/java';
+    const testRoot = projectType.type === 'kotlin' && fs.existsSync(path.join(repoRoot, 'src/test/kotlin'))
+      ? 'src/test/kotlin'
+      : 'src/test/java';
+    if (fs.existsSync(path.join(repoRoot, sourceRoot))) {
+      return [{
+        id: projectType.type,
+        title: projectType.type === 'kotlin' ? 'Kotlin' : 'Java',
+        paths: [`${sourceRoot}/**`],
+        testPaths: fs.existsSync(path.join(repoRoot, testRoot)) ? [`${testRoot}/**`] : ['src/test/**'],
+        invariants: ['must maintain public API behavior', 'must keep native JVM tests green'],
+        risk: 'guarded',
+      }];
+    }
   }
 
   return subdirs.map((name) => {
@@ -229,10 +340,13 @@ function generateObjective(adapter) {
   const surfaceIds = adapter.surfaces.map((s) => s.id);
   const projectType = (adapter.repo && adapter.repo.setup) || '';
   const isNode = projectType.includes('npm');
+  const isJvm = projectType.includes('mvn') || projectType.includes('gradle');
 
   const success = [
     'every exported function has at least one regression test',
-    'every boundary function guards against null/undefined/wrong-type inputs',
+    isJvm
+      ? 'every boundary function guards against nulls, invalid arguments, and illegal state'
+      : 'every boundary function guards against null/undefined/wrong-type inputs',
     'no dead code — every export is reachable, every branch is exercised',
   ];
   if (isNode) {
@@ -282,6 +396,12 @@ function runInit(repoRoot, options = {}) {
     : setup.includes('pip') ? 'python'
     : setup.includes('go mod') ? 'go'
     : setup.includes('cargo') ? 'rust'
+    : setup.includes('bundle') ? 'ruby'
+    : setup.includes('mvn') ? 'java'
+    : setup.includes('gradle') ? 'jvm'
+    : setup.includes('dotnet') ? 'csharp'
+    : setup.includes('swift') || setup.includes('xcodebuild') ? 'swift'
+    : setup.includes('cmake') || setup.includes('meson') || setup.includes('bazel') || setup === 'make' ? 'cpp'
     : 'unknown';
   const summary = `Initialized ${surfaceCount} surface(s) for ${projectTypeName} project. Wrote ${adapterPath} (overnight.yaml) and ${objectivePath} (objective.yaml).`;
 

@@ -50,6 +50,8 @@ function runBenchmarkCase(benchmarkCase, options = {}) {
   });
 
   const metrics = recordMetrics(meter);
+  const exitCode = result.status === null ? 1 : result.status;
+  const stderr = String(result.stderr || '');
 
   // Coerce possibly-null stdout to a safe string once
   const rawStdout = result.stdout || '';
@@ -77,7 +79,9 @@ function runBenchmarkCase(benchmarkCase, options = {}) {
 
   // Determine overall verdict
   let verdict;
-  if (outputMatch.verdict === 'fail') {
+  if (exitCode !== 0) {
+    verdict = 'BENCHMARK_VIOLATION';
+  } else if (outputMatch.verdict === 'fail') {
     verdict = 'BENCHMARK_VIOLATION';
   } else if (boundsMatch.verdict === 'BENCHMARK_VIOLATION') {
     verdict = 'BENCHMARK_VIOLATION';
@@ -88,6 +92,8 @@ function runBenchmarkCase(benchmarkCase, options = {}) {
   return {
     verdict,
     metrics,
+    exitCode,
+    stderrTail: stderr.slice(-2000),
     outputMatch,
     boundsMatch,
   };

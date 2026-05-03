@@ -142,18 +142,92 @@ function buildRustFixture(rootDir) {
   ].join('\n'));
 }
 
+function buildRubyFixture(rootDir) {
+  writeFile(rootDir, 'Gemfile', [
+    'source "https://rubygems.org"',
+    '',
+    'gem "rspec"',
+    '',
+  ].join('\n'));
+  writeFile(rootDir, 'lib/fixture_ruby.rb', [
+    'module FixtureRuby',
+    '  def self.clamp_count(value)',
+    '    return 0 if value < 0',
+    '    value',
+    '  end',
+    'end',
+    '',
+  ].join('\n'));
+  writeFile(rootDir, 'spec/fixture_ruby_spec.rb', [
+    'require_relative "../lib/fixture_ruby"',
+    '',
+    'RSpec.describe FixtureRuby do',
+    '  it "floors negatives" do',
+    '    expect(described_class.clamp_count(-5)).to eq(0)',
+    '  end',
+    'end',
+    '',
+  ].join('\n'));
+}
+
+function buildJavaFixture(rootDir) {
+  writeFile(rootDir, 'pom.xml', '<project><modelVersion>4.0.0</modelVersion><groupId>example</groupId><artifactId>fixture-java</artifactId><version>1.0.0</version></project>\n');
+  writeFile(rootDir, 'src/main/java/example/Clamp.java', 'package example;\n\npublic final class Clamp {\n  public static int clampCount(int value) { return value < 0 ? 0 : value; }\n}\n');
+  writeFile(rootDir, 'src/test/java/example/ClampTest.java', 'package example;\n\nclass ClampTest {}\n');
+}
+
+function buildKotlinFixture(rootDir) {
+  writeFile(rootDir, 'settings.gradle.kts', 'pluginManagement { repositories { gradlePluginPortal() } }\n');
+  writeFile(rootDir, 'build.gradle.kts', 'plugins { kotlin("jvm") version "1.9.0" }\n');
+  writeFile(rootDir, 'src/main/kotlin/example/Clamp.kt', 'package example\n\nfun clampCount(value: Int): Int = if (value < 0) 0 else value\n');
+  writeFile(rootDir, 'src/test/kotlin/example/ClampTest.kt', 'package example\n\nclass ClampTest\n');
+}
+
+function buildCSharpFixture(rootDir) {
+  writeFile(rootDir, 'Fixture.csproj', '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>\n');
+  writeFile(rootDir, 'src/Clamp.cs', 'public static class Clamp { public static int ClampCount(int value) => value < 0 ? 0 : value; }\n');
+  writeFile(rootDir, 'tests/ClampTests.cs', 'public class ClampTests {}\n');
+}
+
+function buildSwiftFixture(rootDir) {
+  writeFile(rootDir, 'Package.swift', '// swift-tools-version: 6.0\nimport PackageDescription\nlet package = Package(name: "FixtureSwift", products: [.library(name: "FixtureSwift", targets: ["FixtureSwift"])], targets: [.target(name: "FixtureSwift"), .testTarget(name: "FixtureSwiftTests", dependencies: ["FixtureSwift"])])\n');
+  writeFile(rootDir, 'Sources/FixtureSwift/Clamp.swift', 'public enum Clamp { public static func clampCount(_ value: Int) -> Int { value < 0 ? 0 : value } }\n');
+  writeFile(rootDir, 'Tests/FixtureSwiftTests/ClampTests.swift', 'import XCTest\nfinal class ClampTests: XCTestCase {}\n');
+}
+
+function buildCFixture(rootDir) {
+  writeFile(rootDir, 'CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)\nproject(fixture_c C)\nenable_testing()\n');
+  writeFile(rootDir, 'include/clamp.h', 'int clamp_count(int value);\n');
+  writeFile(rootDir, 'src/clamp.c', '#include "clamp.h"\nint clamp_count(int value) { return value < 0 ? 0 : value; }\n');
+  writeFile(rootDir, 'tests/test_clamp.c', '#include "clamp.h"\nint main(void) { return clamp_count(-5) == 0 ? 0 : 1; }\n');
+}
+
+function buildCppFixture(rootDir) {
+  writeFile(rootDir, 'CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)\nproject(fixture_cpp CXX)\nenable_testing()\n');
+  writeFile(rootDir, 'include/clamp.hpp', 'namespace clamp { int clamp_count(int value); }\n');
+  writeFile(rootDir, 'src/clamp.cpp', '#include "clamp.hpp"\nnamespace clamp { int clamp_count(int value) { return value < 0 ? 0 : value; } }\n');
+  writeFile(rootDir, 'tests/clamp_test.cpp', '#include "clamp.hpp"\nint main() { return clamp::clamp_count(-5) == 0 ? 0 : 1; }\n');
+}
+
 const MATRIX_BUILDERS = {
   'node-typescript': buildNodeTypescriptFixture,
   'python-fastapi': buildPythonFastApiFixture,
   go: buildGoFixture,
   rust: buildRustFixture,
+  ruby: buildRubyFixture,
+  java: buildJavaFixture,
+  kotlin: buildKotlinFixture,
+  csharp: buildCSharpFixture,
+  swift: buildSwiftFixture,
+  c: buildCFixture,
+  cpp: buildCppFixture,
 };
 
 function createFixtureRepo(stackId) {
   const builder = MATRIX_BUILDERS[stackId];
   if (!builder) {
     const { AdapterError } = require('./errors.cjs');
-    throw new AdapterError('HOSTILE_MATRIX_UNKNOWN_STACK', 'stackId', `Unknown hostile repo fixture: ${stackId}`, { fixHint: 'Pass one of the registered stack ids (node-typescript, python-fastapi, go, rust) via runHostileRepoMatrix({ stacks: [...] }).' });
+    throw new AdapterError('HOSTILE_MATRIX_UNKNOWN_STACK', 'stackId', `Unknown hostile repo fixture: ${stackId}`, { fixHint: 'Pass one of the registered stack ids (node-typescript, python-fastapi, go, rust, ruby, java, kotlin, csharp, swift, c, cpp) via runHostileRepoMatrix({ stacks: [...] }).' });
   }
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), `xo-loop-${stackId}-`));
   builder(rootDir);
@@ -265,7 +339,7 @@ async function runHostileRepoMatrix(options = {}) {
   }
   const stacks = Array.isArray(options.stacks) && options.stacks.length > 0
     ? options.stacks.slice()
-    : ['node-typescript', 'python-fastapi', 'go', 'rust'];
+    : ['node-typescript', 'python-fastapi', 'go', 'rust', 'ruby', 'java', 'kotlin', 'csharp', 'swift', 'c', 'cpp'];
   const results = [];
   for (const stackId of stacks) {
     results.push(await runMatrixCase(stackId));

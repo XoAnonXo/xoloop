@@ -1,0 +1,15 @@
+goal: "Raise the engineering bar: structured errors, regression test coverage for every public function, input validation on every boundary, no dead code."
+allowed_surfaces:
+  - java
+success:
+  - every public API returns clear, actionable error messages
+  - every exported function has at least one regression test
+  - every boundary function guards against nulls, invalid arguments, and illegal state
+  - no dead code — every export is reachable, every branch is exercised
+required_tests:
+  - regression
+stop_conditions:
+  - would add a new feature beyond quality polish
+evidence:
+  - test suite is green and strictly growing
+priority: high

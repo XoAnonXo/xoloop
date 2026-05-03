@@ -1,0 +1,16 @@
+{
+  "name": "xoloop-plugin-repo",
+  "version": "0.3.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test tests/*.test.cjs",
+    "completeness": "node plugins/xoloop/bin/xoloop-completeness.cjs --json"
+  },
+  "dependencies": {
+    "fast-check": "^4.7.0",
+    "tsx": "^4.21.0",
+    "yaml": "^2.8.4",
+    "zod": "^4.4.2"
+  }
+}

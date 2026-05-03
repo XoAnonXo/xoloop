@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('node:path');
+const { makeProposalLoader } = require('./live_agent_provider.cjs');
 
 // ---------------------------------------------------------------------------
 // parsePolishOptions
@@ -160,9 +161,12 @@ async function runPolishLoop(options) {
     adapterPath = 'overnight.yaml',
     objectivePath = 'objective.yaml',
     repoRoot: rawRepoRoot,
+    proposalLoader,
+    liveAgentProvider,
   } = options || {};
 
   const repoRoot = path.resolve(rawRepoRoot || process.cwd());
+  const effectiveProposalLoader = proposalLoader || makeProposalLoader(liveAgentProvider, 'polish');
 
   // -----------------------------------------------------------------------
   // Step 1: Load adapter and objective
@@ -225,6 +229,7 @@ async function runPolishLoop(options) {
         adapterPath,
         objectivePath,
         allowDirty: true,
+        proposalLoader: effectiveProposalLoader,
       });
     } catch (err) {
       // Record the failed round and continue

@@ -10,6 +10,31 @@ const { applyOperationSet, rollbackOperationSet, normalizeOperationSet } = requi
 const { validateImprovement } = require('./improvement_validator.cjs');
 const { extractJsonObjectFromText } = require('./baton_common.cjs');
 
+const LANGUAGE_BY_EXTENSION = new Map([
+  ['.cjs', 'javascript'],
+  ['.mjs', 'javascript'],
+  ['.js', 'javascript'],
+  ['.jsx', 'javascript'],
+  ['.ts', 'typescript'],
+  ['.tsx', 'typescript'],
+  ['.py', 'python'],
+  ['.rs', 'rust'],
+  ['.go', 'go'],
+  ['.rb', 'ruby'],
+  ['.java', 'java'],
+  ['.kt', 'kotlin'],
+  ['.kts', 'kotlin'],
+  ['.cs', 'csharp'],
+  ['.swift', 'swift'],
+  ['.c', 'c'],
+  ['.h', 'c'],
+  ['.cc', 'cpp'],
+  ['.cpp', 'cpp'],
+  ['.cxx', 'cpp'],
+  ['.hpp', 'cpp'],
+  ['.hh', 'cpp'],
+]);
+
 // ---------------------------------------------------------------------------
 // parseImproveOptions
 // ---------------------------------------------------------------------------
@@ -125,7 +150,7 @@ function buildOptimizationPrompt(ctx) {
   ].join('\n');
 
   const sourceSection = (sourceFiles || []).map(f =>
-    `## File: ${f.path}\n\`\`\`javascript\n${f.content}\n\`\`\``
+    `## File: ${f.path}\n\`\`\`${detectSourceLanguage(f.path)}\n${f.content}\n\`\`\``
   ).join('\n\n');
 
   const hotspotSection = (hotspots || []).length > 0
@@ -202,6 +227,11 @@ function parseModelResponse(responseText) {
 function extractTargetPaths(benchmark, cwd) {
   const paths = new Set();
   const requirePattern = /require\(['"]([^'"]+)['"]\)/g;
+  const fileTokenPattern = /(?:^|\s)([^\s'"()]+?\.(?:cjs|mjs|js|jsx|ts|tsx|py|rs|go|rb|java|kt|kts|cs|swift|c|h|cc|cpp|cxx|hpp|hh))(?:\s|$)/g;
+  const pythonModulePattern = /(?:^|\s)(?:python3?|uv\s+run\s+python|python\s+-m)\s+(?:-m\s+)?([A-Za-z_][\w.]*)(?:\s|$)/g;
+  const rubyRequirePattern = /(?:require|require_relative)\s+['"]([^'"]+)['"]/g;
+  const dotnetProjectPattern = /(?:^|\s)([^\s'"()]+?\.(?:csproj|sln))(?:\s|$)/g;
+  const javaMainClassPattern = /(?:^|\s)-Dexec\.mainClass=([A-Za-z_][\w.]*)/g;
 
   for (const c of (benchmark.cases || [])) {
     const command = c.entry_point && c.entry_point.command;
@@ -215,9 +245,88 @@ function extractTargetPaths(benchmark, cwd) {
         if (fs.existsSync(resolved)) paths.add(resolved);
       }
     }
+
+    fileTokenPattern.lastIndex = 0;
+    while ((match = fileTokenPattern.exec(command)) !== null) {
+      addExistingPathCandidate(paths, cwd, match[1]);
+    }
+
+    pythonModulePattern.lastIndex = 0;
+    while ((match = pythonModulePattern.exec(command)) !== null) {
+      addPythonModuleCandidate(paths, cwd, match[1]);
+    }
+
+    rubyRequirePattern.lastIndex = 0;
+    while ((match = rubyRequirePattern.exec(command)) !== null) {
+      addRubyRequireCandidate(paths, cwd, match[1]);
+    }
+
+    dotnetProjectPattern.lastIndex = 0;
+    while ((match = dotnetProjectPattern.exec(command)) !== null) {
+      addDotnetProjectSources(paths, cwd, match[1]);
+    }
+
+    javaMainClassPattern.lastIndex = 0;
+    while ((match = javaMainClassPattern.exec(command)) !== null) {
+      addJavaClassCandidate(paths, cwd, match[1]);
+    }
   }
 
   return [...paths];
+}
+
+function addJavaClassCandidate(paths, cwd, className) {
+  const rel = className.replace(/\./g, path.sep) + '.java';
+  for (const sourceRoot of ['src/main/java', 'src/test/java']) {
+    const candidate = path.join(cwd, sourceRoot, rel);
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      paths.add(candidate);
+    }
+  }
+}
+
+function addDotnetProjectSources(paths, cwd, projectPath) {
+  const resolved = path.resolve(cwd, projectPath);
+  const root = fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()
+    ? resolved
+    : path.dirname(resolved);
+  if (!fs.existsSync(root)) return;
+  for (const entry of fs.readdirSync(root)) {
+    if (entry.endsWith('.cs')) addExistingPathCandidate(paths, root, entry);
+  }
+}
+
+function detectSourceLanguage(filePath) {
+  const ext = path.extname(String(filePath || '')).toLowerCase();
+  return LANGUAGE_BY_EXTENSION.get(ext) || '';
+}
+
+function addExistingPathCandidate(paths, cwd, candidate) {
+  if (!candidate || typeof candidate !== 'string') return;
+  const cleaned = candidate.replace(/^['"]|['"]$/g, '');
+  const resolved = path.resolve(cwd, cleaned);
+  if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+    paths.add(resolved);
+  }
+}
+
+function addPythonModuleCandidate(paths, cwd, moduleName) {
+  if (!moduleName || typeof moduleName !== 'string') return;
+  const modulePath = moduleName.replace(/\./g, path.sep);
+  for (const candidate of [`${modulePath}.py`, path.join(modulePath, '__init__.py')]) {
+    addExistingPathCandidate(paths, cwd, candidate);
+  }
+}
+
+function addRubyRequireCandidate(paths, cwd, requirePath) {
+  if (!requirePath || typeof requirePath !== 'string') return;
+  const candidates = [];
+  if (requirePath.startsWith('./') || requirePath.startsWith('../')) {
+    candidates.push(requirePath.endsWith('.rb') ? requirePath : `${requirePath}.rb`);
+  } else {
+    candidates.push(path.join('lib', requirePath.endsWith('.rb') ? requirePath : `${requirePath}.rb`));
+  }
+  for (const candidate of candidates) addExistingPathCandidate(paths, cwd, candidate);
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +444,7 @@ async function runImproveLoop(options) {
       // 5b. Detect hotspots
       const allHotspots = [];
       for (const sf of sourceFiles) {
-        const spots = detectHotspots(sf.content);
+        const spots = detectHotspots(sf.content, { language: detectSourceLanguage(sf.path) });
         for (const spot of spots) {
           allHotspots.push({ ...spot, file: sf.path });
         }
@@ -455,6 +564,7 @@ module.exports = {
   buildImproveSummary,
   buildOptimizationPrompt,
   parseModelResponse,
+  detectSourceLanguage,
   extractTargetPaths,
   runImproveLoop,
 };

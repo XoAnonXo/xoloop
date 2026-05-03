@@ -97,6 +97,7 @@ const {
   proposalSummary,
   validateProposalOperationLimits,
 } = require('./overnight_engine_proposal.cjs');
+const { makeProposalLoader } = require('./live_agent_provider.cjs');
 
 const OVERNIGHT_ENGINE_SCHEMA_VERSION = '1.0.0';
 const DEFAULT_REPORT_DIR = 'proving-ground/reports/overnight';
@@ -2378,6 +2379,7 @@ const {
 
 async function runOvernightBatch(options = {}) {
   const repoRoot = path.resolve(options.cwd || process.cwd());
+  const proposalLoader = options.proposalLoader || makeProposalLoader(options.liveAgentProvider, 'overnight');
   const adapter = loadOvernightAdapter(options.adapterPath, { repoRoot });
   const objective = loadOvernightObjective(options.objectivePath, adapter, { repoRoot });
   const workingTree = getWorkingTreeState(repoRoot);
@@ -2499,7 +2501,7 @@ async function runOvernightBatch(options = {}) {
         manifestPaths,
         manifest: currentManifest,
         surface,
-        proposalLoader: options.proposalLoader,
+        proposalLoader,
         reviewLoader: options.reviewLoader,
         fetchFn: options.fetchFn,
         syntheticAuditDecision: options.syntheticAuditDecision,

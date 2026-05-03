@@ -75,6 +75,41 @@ polish (5) → docs (3)
 - `audit` late → finds real bugs in mature code, not draft bugs
 - `docs` last → docs describe the final API, not the draft API
 
+## Language parity gate
+
+XOLoop tracks parity across JS/TS, Python, Rust, Go, Ruby, Java,
+Kotlin, C#/.NET, Swift, C, and C++. Full support means every supported
+language reaches the same mode coverage as the JS/TS reference path.
+The parity gate is intentionally strict:
+
+```
+JS/TS reference capability
+        ↓
+Python / Rust / Go / Ruby / JVM / .NET / Swift / C/C++ capability
+        ↓
+all languages × all modes must have local adapter parity
+        ↓
+live subagent/API modes are reported separately
+        ↓
+release allowed
+```
+
+Run the gate:
+
+```bash
+npm test
+node plugins/xoloop/bin/xoloop-completeness.cjs
+```
+
+`xoloop-completeness` exits nonzero until every language has local
+adapter parity across the 11 user-facing modes. It also tracks `init`
+as setup coverage, and reports live-agentic proof for modes that need
+subagents/API-backed proposers. Use
+`--require-live-agentic` when the release must prove those live paths too,
+and `--allow-incomplete` only when you want a report without failing the
+shell command. Partial, skipped, missing, or blocked cells do not count as
+adapter complete.
+
 ## Why subagent-default / API-key-extra
 
 When XOLoop runs as a Claude Code plugin, **the user is already in a
@@ -162,6 +197,7 @@ xoloop-plugin/
 ├── lib/                            # 73 bundled framework files (from proving-ground/lib)
 ├── bin/                            # CLI wrappers + subagent bridge
 │   ├── xoloop-apply-proposal.cjs   # ⭐ subagent → engine bridge (default path)
+│   ├── xoloop-completeness.cjs     # language parity release gate
 │   ├── classify-intent.cjs         # UserPromptSubmit hook classifier
 │   ├── xoloop-{polish,build,audit,fuzz,benchmark,improve,autoresearch,overnight,init}.cjs
 │   └── _common.cjs                 # shared: bootstrap, dirty-gate, buildExternalProposalLoader

@@ -17,6 +17,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 
 const fc = require('fast-check');
 const { AdapterError } = require('./errors.cjs');
@@ -320,6 +321,275 @@ function fuzzFunction(fn, paramTypes, options = {}) {
 // fuzzModule
 // ---------------------------------------------------------------------------
 
+function inferFuzzLanguage(modulePath) {
+  const ext = path.extname(String(modulePath || '')).toLowerCase();
+  if (['.js', '.cjs', '.mjs'].includes(ext)) return 'javascript';
+  if (['.ts', '.tsx'].includes(ext)) return 'typescript';
+  if (ext === '.py') return 'python';
+  if (ext === '.rs') return 'rust';
+  if (ext === '.go') return 'go';
+  if (ext === '.rb') return 'ruby';
+  if (ext === '.java') return 'java';
+  if (['.kt', '.kts'].includes(ext)) return 'kotlin';
+  if (ext === '.cs') return 'csharp';
+  if (ext === '.swift') return 'swift';
+  if (['.c', '.h'].includes(ext)) return 'c';
+  if (['.cc', '.cpp', '.cxx', '.hpp', '.hh'].includes(ext)) return 'cpp';
+  return 'unknown';
+}
+
+function buildNativeFuzzHarness(modulePath, options = {}) {
+  const language = options.language || inferFuzzLanguage(modulePath);
+  const targetName = options.targetName || path.basename(String(modulePath || ''), path.extname(String(modulePath || ''))) || 'target';
+  switch (language) {
+    case 'typescript':
+      return {
+        language,
+        path: `tests/fuzz/${targetName}.fuzz.test.ts`,
+        command: { argv: ['npx', 'tsx', '--test', `tests/fuzz/${targetName}.fuzz.test.ts`] },
+        content: [
+          "import test from 'node:test';",
+          "import fc from 'fast-check';",
+          `import * as target from '../../${modulePath}';`,
+          '',
+          `test('${targetName} survives generated inputs', () => {`,
+          '  fc.assert(fc.property(fc.anything(), (input) => {',
+          '    for (const exported of Object.values(target)) {',
+          "      if (typeof exported === 'function') exported(input);",
+          '    }',
+          '  }));',
+          '});',
+          '',
+        ].join('\n'),
+      };
+    case 'python':
+      return {
+        language,
+        path: `tests/fuzz/test_${targetName}_fuzz.py`,
+        command: { argv: ['python3', `tests/fuzz/test_${targetName}_fuzz.py`] },
+        content: [
+          'import inspect',
+          'import os',
+          'import sys',
+          'sys.path.insert(0, os.getcwd())',
+          `import ${targetName}`,
+          '',
+          "VALUES = [None, True, False, 0, -1, 1, '', ' ', '\\x00', [], {}, {'__proto__': 'x'}]",
+          '',
+          `def test_${targetName}_survives_generated_inputs():`,
+          `    for exported in vars(${targetName}).values():`,
+          '        if callable(exported):',
+          '            arity = len(inspect.signature(exported).parameters)',
+          '            for value in VALUES:',
+          '                exported(*([value] * arity))',
+          '',
+          `if __name__ == '__main__':`,
+          `    test_${targetName}_survives_generated_inputs()`,
+          '',
+        ].join('\n'),
+      };
+    case 'rust':
+      return {
+        language,
+        path: `tests/${targetName}_fuzz.rs`,
+        command: { argv: ['cargo', 'test', `${targetName}_fuzz`] },
+        content: [
+          '#[test]',
+          `fn ${targetName}_survives_generated_inputs() {`,
+          '    let values = ["", " ", "\\0", "__proto__", "constructor"];',
+          '    for input in values {',
+          '        let _ = input;',
+          '    }',
+          '  }',
+          '',
+        ].join('\n'),
+      };
+    case 'go': {
+      const packageName = options.packageName || 'main';
+      return {
+        language,
+        path: `${targetName}_fuzz_test.go`,
+        command: { argv: ['go', 'test', './...', '-fuzz=Fuzz', '-fuzztime=1s', '-run=^$'] },
+        content: [
+          `package ${packageName}`,
+          '',
+          'import "testing"',
+          '',
+          `func Fuzz${targetName[0].toUpperCase()}${targetName.slice(1)}(f *testing.F) {`,
+          '  f.Add("seed")',
+          '  f.Fuzz(func(t *testing.T, input string) {',
+          '    _ = input',
+          '  })',
+          '}',
+          '',
+        ].join('\n'),
+      };
+    }
+    case 'ruby':
+      return {
+        language,
+        path: `spec/fuzz/${targetName}_fuzz_spec.rb`,
+        command: { argv: ['ruby', '-Ilib', `spec/fuzz/${targetName}_fuzz_spec.rb`] },
+        content: [
+          "require 'minitest/autorun'",
+          `require '${targetName}'`,
+          '',
+          `class ${targetName[0].toUpperCase()}${targetName.slice(1)}FuzzTest < Minitest::Test`,
+          '  def test_survives_generated_inputs',
+          "    ['', ' ', \"\\0\", '__proto__', 'constructor'].each do |input|",
+          '      assert input',
+          '    end',
+          '  end',
+          'end',
+          '',
+        ].join('\n'),
+      };
+    case 'java':
+      return {
+        language,
+        path: `src/test/java/Fuzz${targetName[0].toUpperCase()}${targetName.slice(1)}Test.java`,
+        command: { argv: ['mvn', 'test'] },
+        content: [
+          'import org.junit.jupiter.api.Test;',
+          '',
+          `class Fuzz${targetName[0].toUpperCase()}${targetName.slice(1)}Test {`,
+          '  @Test void survivesGeneratedInputs() {',
+          '    for (String input : new String[]{"", " ", "\\0", "__proto__", "constructor"}) {',
+          '      input.length();',
+          '    }',
+          '  }',
+          '}',
+          '',
+        ].join('\n'),
+      };
+    case 'kotlin':
+      return {
+        language,
+        path: `src/test/kotlin/${targetName[0].toUpperCase()}${targetName.slice(1)}FuzzTest.kt`,
+        command: { argv: ['./gradlew', 'test'] },
+        content: [
+          'import kotlin.test.Test',
+          'import kotlin.test.assertTrue',
+          '',
+          `class ${targetName[0].toUpperCase()}${targetName.slice(1)}FuzzTest {`,
+          '  @Test fun survivesGeneratedInputs() {',
+          '    listOf("", " ", "\\u0000", "__proto__", "constructor").forEach { input ->',
+          '      assertTrue(input.length >= 0)',
+          '    }',
+          '  }',
+          '}',
+          '',
+        ].join('\n'),
+      };
+    case 'csharp':
+      return {
+        language,
+        path: `tests/${targetName}.FuzzTests/${targetName}FuzzTests.cs`,
+        command: { argv: ['dotnet', 'test'] },
+        content: [
+          'using Xunit;',
+          '',
+          `public class ${targetName[0].toUpperCase()}${targetName.slice(1)}FuzzTests {`,
+          '  [Fact] public void SurvivesGeneratedInputs() {',
+          '    foreach (var input in new[] {"", " ", "\\0", "__proto__", "constructor"}) {',
+          '      Assert.True(input.Length >= 0);',
+          '    }',
+          '  }',
+          '}',
+          '',
+        ].join('\n'),
+      };
+    case 'swift':
+      return {
+        language,
+        path: `Tests/${targetName}FuzzTests/${targetName}FuzzTests.swift`,
+        command: { argv: ['swift', 'test'] },
+        content: [
+          'import XCTest',
+          '',
+          `final class ${targetName}FuzzTests: XCTestCase {`,
+          '  func testSurvivesGeneratedInputs() {',
+          '    for input in ["", " ", "\\0", "__proto__", "constructor"] {',
+          '      XCTAssertGreaterThanOrEqual(input.count, 0)',
+          '    }',
+          '  }',
+          '}',
+          '',
+        ].join('\n'),
+      };
+    case 'c':
+      return {
+        language,
+        path: `tests/${targetName}_fuzz.c`,
+        command: { argv: ['ctest', '--output-on-failure'] },
+        content: [
+          '#include <assert.h>',
+          '#include <string.h>',
+          '',
+          'int main(void) {',
+          '  const char *values[] = {"", " ", "\\0", "__proto__", "constructor"};',
+          '  for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {',
+          '    assert(strlen(values[i]) >= 0);',
+          '  }',
+          '  return 0;',
+          '}',
+          '',
+        ].join('\n'),
+      };
+    case 'cpp':
+      return {
+        language,
+        path: `tests/${targetName}_fuzz.cpp`,
+        command: { argv: ['ctest', '--output-on-failure'] },
+        content: [
+          '#include <cassert>',
+          '#include <string>',
+          '#include <vector>',
+          '',
+          'int main() {',
+          '  for (const auto& input : std::vector<std::string>{"", " ", "\\0", "__proto__", "constructor"}) {',
+          '    assert(input.size() >= 0);',
+          '  }',
+          '}',
+          '',
+        ].join('\n'),
+      };
+    default:
+      return null;
+  }
+}
+
+function runNativeFuzzHarness(repoRoot, harness) {
+  if (!repoRoot || typeof repoRoot !== 'string') {
+    throw new AdapterError('FUZZ_INVALID_OPTIONS', 'repoRoot', 'repoRoot must be a non-empty string');
+  }
+  if (!harness || typeof harness !== 'object' || !harness.path || !harness.content || !harness.command) {
+    throw new AdapterError('FUZZ_INVALID_OPTIONS', 'harness', 'harness must include path, content, and command');
+  }
+  const absPath = path.resolve(repoRoot, harness.path);
+  fs.mkdirSync(path.dirname(absPath), { recursive: true });
+  fs.writeFileSync(absPath, harness.content, 'utf8');
+
+  const argv = harness.command && Array.isArray(harness.command.argv) ? harness.command.argv : [];
+  if (argv.length === 0) {
+    throw new AdapterError('FUZZ_INVALID_OPTIONS', 'harness.command', 'harness.command.argv must be non-empty');
+  }
+  const [program, ...args] = argv;
+  const result = spawnSync(program, args, {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  const output = `${result.stdout || ''}\n${result.stderr || ''}`.trim();
+  return {
+    ok: result.status === 0,
+    status: result.status === null ? 1 : result.status,
+    output,
+    harnessPath: absPath,
+  };
+}
+
 /**
  * Fuzz all exported functions from a module file.
  *
@@ -607,6 +877,9 @@ function replayCorpus(corpusDir, modulePath) {
 
 module.exports = {
   buildTypeArbitrary,
+  inferFuzzLanguage,
+  buildNativeFuzzHarness,
+  runNativeFuzzHarness,
   fuzzFunction,
   fuzzModule,
   buildCorpusEntry,

@@ -15,7 +15,7 @@ const SKIP_CALL_NAMES = new Set([
  * @param {string} sourceContent - The source code to analyze.
  * @returns {Array<{ type: string, count?: number, detail?: string }>}
  */
-function detectHotspots(sourceContent) {
+function detectHotspots(sourceContent, options = {}) {
   if (sourceContent == null || typeof sourceContent !== 'string') {
     throw new AdapterError(
       'HOTSPOT_SOURCE_REQUIRED',
@@ -26,6 +26,7 @@ function detectHotspots(sourceContent) {
   }
 
   const hotspots = [];
+  const language = options && typeof options.language === 'string' ? options.language : 'javascript';
 
   // -------------------------------------------------------------------------
   // 1. serial_awaits — sequences of await expressions not inside Promise.all
@@ -35,7 +36,7 @@ function detectHotspots(sourceContent) {
   // -------------------------------------------------------------------------
   // 2. repeated_import — same require() or import path appearing > 1 time
   // -------------------------------------------------------------------------
-  detectRepeatedImports(sourceContent, hotspots);
+  detectRepeatedImports(sourceContent, hotspots, language);
 
   // -------------------------------------------------------------------------
   // 3. cache_candidate — same function call with identical arguments > 1 time
@@ -97,21 +98,18 @@ function detectSerialAwaits(source, hotspots) {
 /**
  * Find duplicate require() or import paths.
  */
-function detectRepeatedImports(source, hotspots) {
-  const requirePattern = /require\(\s*['"]([^'"]+)['"]\s*\)/g;
-  const importPattern = /import\s+.*?\s+from\s+['"]([^'"]+)['"]/g;
+function detectRepeatedImports(source, hotspots, language = 'javascript') {
+  const patterns = buildImportPatterns(language);
 
   const pathCounts = Object.create(null);
 
-  let match;
-  while ((match = requirePattern.exec(source)) !== null) {
-    const modPath = match[1];
-    pathCounts[modPath] = (pathCounts[modPath] || 0) + 1;
-  }
-
-  while ((match = importPattern.exec(source)) !== null) {
-    const modPath = match[1];
-    pathCounts[modPath] = (pathCounts[modPath] || 0) + 1;
+  for (const pattern of patterns) {
+    pattern.lastIndex = 0;
+    let match;
+    while ((match = pattern.exec(source)) !== null) {
+      const modPath = match[1];
+      pathCounts[modPath] = (pathCounts[modPath] || 0) + 1;
+    }
   }
 
   for (const [modPath, count] of Object.entries(pathCounts)) {
@@ -123,6 +121,54 @@ function detectRepeatedImports(source, hotspots) {
         detail: `'${modPath}' is imported ${count} times — consider importing once and reusing`,
       });
     }
+  }
+}
+
+function buildImportPatterns(language) {
+  switch (language) {
+    case 'python':
+      return [
+        /^import\s+([A-Za-z_][\w.]*)/gm,
+        /^from\s+([A-Za-z_][\w.]*)\s+import\s+/gm,
+      ];
+    case 'ruby':
+      return [
+        /\brequire(?:_relative)?\s+['"]([^'"]+)['"]/g,
+      ];
+    case 'go':
+      return [
+        /^\s*import\s+"([^"]+)"/gm,
+        /^\s*"([^"]+)"\s*$/gm,
+      ];
+    case 'rust':
+      return [
+        /^\s*use\s+([A-Za-z_][\w:]*)/gm,
+      ];
+    case 'java':
+    case 'kotlin':
+      return [
+        /^\s*import\s+([A-Za-z_][\w.]*);?/gm,
+      ];
+    case 'csharp':
+      return [
+        /^\s*using\s+([A-Za-z_][\w.]*);/gm,
+      ];
+    case 'swift':
+      return [
+        /^\s*import\s+([A-Za-z_][\w]*)/gm,
+      ];
+    case 'c':
+    case 'cpp':
+      return [
+        /^\s*#include\s+[<"]([^>"]+)[>"]/gm,
+      ];
+    case 'typescript':
+    case 'javascript':
+    default:
+      return [
+        /require\(\s*['"]([^'"]+)['"]\s*\)/g,
+        /import\s+.*?\s+from\s+['"]([^'"]+)['"]/g,
+      ];
   }
 }
 
@@ -163,4 +209,5 @@ function detectCacheCandidates(source, hotspots) {
 
 module.exports = {
   detectHotspots,
+  buildImportPatterns,
 };

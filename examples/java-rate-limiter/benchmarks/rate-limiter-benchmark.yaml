@@ -1,0 +1,13 @@
+benchmark: java rate limiter smoke benchmark
+cases:
+  - id: java-rate-limiter-100k
+    input: {}
+    expected_output:
+      schema:
+        decisions_per_second:
+          type: number
+          min: 1
+    entry_point:
+      command: mvn -q -DskipTests compile exec:java -Dexec.mainClass=dev.xoloop.examples.ratelimit.RateLimiterBenchmark
+    bounds:
+      wallTimeMs: 10000

@@ -29,9 +29,253 @@ const { validateRedGreenDelta, runTestsInDir } = require('./delta_validator.cjs'
 const { callModel } = require('./model_router.cjs');
 const { AdapterError } = require('./errors.cjs');
 
+async function callBuildAgent({ liveAgentProvider, proposerConfig, role, language, systemPrompt, userPrompt, context }) {
+  if (liveAgentProvider && typeof liveAgentProvider.call === 'function') {
+    return liveAgentProvider.call({
+      mode: 'build',
+      role,
+      language,
+      requestKind: role,
+      systemPrompt,
+      userPrompt,
+      context,
+      schema: { type: 'json_object' },
+    });
+  }
+  return callModel({
+    ...proposerConfig,
+    systemPrompt,
+    userPrompt,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Prompt builders
 // ---------------------------------------------------------------------------
+
+const LANGUAGE_BY_EXTENSION = new Map([
+  ['.cjs', 'javascript'],
+  ['.mjs', 'javascript'],
+  ['.js', 'javascript'],
+  ['.jsx', 'javascript'],
+  ['.ts', 'typescript'],
+  ['.tsx', 'typescript'],
+  ['.py', 'python'],
+  ['.rs', 'rust'],
+  ['.go', 'go'],
+  ['.rb', 'ruby'],
+  ['.java', 'java'],
+  ['.kt', 'kotlin'],
+  ['.kts', 'kotlin'],
+  ['.cs', 'csharp'],
+  ['.swift', 'swift'],
+  ['.c', 'c'],
+  ['.h', 'c'],
+  ['.cc', 'cpp'],
+  ['.cpp', 'cpp'],
+  ['.cxx', 'cpp'],
+  ['.hpp', 'cpp'],
+  ['.hh', 'cpp'],
+]);
+
+function collectBuildSurfacePaths(feature) {
+  const surface = feature && feature.newSurface && typeof feature.newSurface === 'object'
+    ? feature.newSurface
+    : {};
+  return [
+    ...(Array.isArray(surface.paths) ? surface.paths : []),
+    ...(Array.isArray(surface.testPaths) ? surface.testPaths : []),
+  ].filter((entry) => typeof entry === 'string' && entry.trim().length > 0);
+}
+
+function inferBuildLanguage(feature, adapter = {}) {
+  const surfacePaths = collectBuildSurfacePaths(feature);
+  for (const surfacePath of surfacePaths) {
+    const lower = surfacePath.toLowerCase();
+    if (lower === 'cargo.toml' || lower.includes('/cargo.toml')) return 'rust';
+    if (lower === 'gemfile' || lower.endsWith('.gemspec')) return 'ruby';
+    if (lower === 'pom.xml' || lower.endsWith('/pom.xml')) return 'java';
+    if (lower === 'build.gradle.kts' || lower.endsWith('/build.gradle.kts') || lower.endsWith('.kt')) return 'kotlin';
+    if (lower === 'build.gradle' || lower.endsWith('/build.gradle') || lower === 'settings.gradle' || lower.endsWith('/settings.gradle')) return 'java';
+    if (lower.endsWith('.csproj') || lower.endsWith('.sln')) return 'csharp';
+    if (lower === 'package.swift' || lower.endsWith('/package.swift') || lower.endsWith('.xcodeproj') || lower.endsWith('.xcworkspace')) return 'swift';
+    if (['cmakelists.txt', 'makefile', 'meson.build', 'build.bazel'].includes(path.basename(lower))) return 'cpp';
+    const ext = path.extname(lower);
+    if (LANGUAGE_BY_EXTENSION.has(ext)) return LANGUAGE_BY_EXTENSION.get(ext);
+  }
+
+  const adapterHints = adapter && adapter.surface && Array.isArray(adapter.surface.languageHints)
+    ? adapter.surface.languageHints
+    : [];
+  for (const hint of adapterHints) {
+    const normalized = typeof hint === 'string' ? hint.toLowerCase() : '';
+    if (['javascript', 'typescript', 'python', 'rust', 'go', 'ruby', 'java', 'kotlin', 'csharp', 'swift', 'c', 'cpp'].includes(normalized)) {
+      return normalized;
+    }
+  }
+
+  return 'javascript';
+}
+
+function buildLanguageBuildGuidance(language) {
+  switch (language) {
+    case 'typescript':
+      return {
+        language: 'typescript',
+        testInstruction: 'Use the repository TypeScript test style. Prefer .test.ts files and import/export syntax that matches the existing project.',
+        testPath: 'tests/example.test.ts',
+        testContent: "import { strict as assert } from 'node:assert';\n...",
+        implementationPath: 'src/example.ts',
+        implementationContent: 'export function example() {\\n  ...\\n}\\n',
+        fence: 'typescript',
+      };
+    case 'python':
+      return {
+        language: 'python',
+        testInstruction: 'Use pytest. Create tests/test_*.py files, import the target module, and use plain assert statements.',
+        testPath: 'tests/test_example.py',
+        testContent: 'from src.example import example\n\ndef test_example():\n    assert example() == "expected"\n',
+        implementationPath: 'src/example.py',
+        implementationContent: 'def example():\n    ...\n',
+        fence: 'python',
+      };
+    case 'rust':
+      return {
+        language: 'rust',
+        testInstruction: 'Use cargo test. Prefer integration tests under tests/*.rs, or #[test] module tests when the feature belongs inside a crate module.',
+        testPath: 'tests/example.rs',
+        testContent: 'use crate_name::example;\n\n#[test]\nfn example_works() {\n    assert_eq!(example(), "expected");\n}\n',
+        implementationPath: 'src/lib.rs',
+        implementationContent: 'pub fn example() -> String {\n    ...\n}\n',
+        fence: 'rust',
+      };
+    case 'go':
+      return {
+        language: 'go',
+        testInstruction: 'Use Go testing. Create *_test.go files with package-compatible imports and functions named TestXxx.',
+        testPath: 'example_test.go',
+        testContent: 'package example\n\nimport "testing"\n\nfunc TestExample(t *testing.T) {\n    if got := Example(); got != "expected" {\n        t.Fatalf("got %q", got)\n    }\n}\n',
+        implementationPath: 'example.go',
+        implementationContent: 'package example\n\nfunc Example() string {\n    ...\n}\n',
+        fence: 'go',
+      };
+    case 'ruby':
+      return {
+        language: 'ruby',
+        testInstruction: 'Use RSpec when the repo has spec/ paths; otherwise use minitest. Prefer spec/**/*_spec.rb for RSpec projects.',
+        testPath: 'spec/example_spec.rb',
+        testContent: "require 'example'\n\nRSpec.describe Example do\n  it 'works' do\n    expect(described_class.call).to eq('expected')\n  end\nend\n",
+        implementationPath: 'lib/example.rb',
+        implementationContent: 'class Example\n  def self.call\n    ...\n  end\nend\n',
+        fence: 'ruby',
+      };
+    case 'java':
+      return {
+        language: 'java',
+        testInstruction: 'Use the repository JVM test style. Prefer JUnit tests under src/test/java and implementation under src/main/java.',
+        testPath: 'src/test/java/com/example/ExampleTest.java',
+        testContent: 'import org.junit.jupiter.api.Test;\nimport static org.junit.jupiter.api.Assertions.*;\n\nclass ExampleTest {\n  @Test void works() { assertEquals("expected", Example.value()); }\n}\n',
+        implementationPath: 'src/main/java/com/example/Example.java',
+        implementationContent: 'package com.example;\n\npublic final class Example {\n  public static String value() { ... }\n}\n',
+        fence: 'java',
+      };
+    case 'kotlin':
+      return {
+        language: 'kotlin',
+        testInstruction: 'Use the repository Kotlin/JVM test style. Prefer kotlin.test or JUnit tests under src/test/kotlin and implementation under src/main/kotlin.',
+        testPath: 'src/test/kotlin/ExampleTest.kt',
+        testContent: 'import kotlin.test.Test\nimport kotlin.test.assertEquals\n\nclass ExampleTest {\n  @Test fun works() { assertEquals("expected", example()) }\n}\n',
+        implementationPath: 'src/main/kotlin/Example.kt',
+        implementationContent: 'fun example(): String {\n  ...\n}\n',
+        fence: 'kotlin',
+      };
+    case 'csharp':
+      return {
+        language: 'csharp',
+        testInstruction: 'Use the repository .NET test style. Prefer xUnit/NUnit/MSTest tests in a test project and implementation in .cs files.',
+        testPath: 'tests/Example.Tests/ExampleTests.cs',
+        testContent: 'using Xunit;\n\npublic class ExampleTests {\n  [Fact] public void Works() { Assert.Equal("expected", Example.Value()); }\n}\n',
+        implementationPath: 'src/Example/Example.cs',
+        implementationContent: 'public static class Example {\n  public static string Value() => ...;\n}\n',
+        fence: 'csharp',
+      };
+    case 'swift':
+      return {
+        language: 'swift',
+        testInstruction: 'Use XCTest. Prefer Tests/<Target>Tests/*.swift for Swift Package projects or the existing Xcode test target layout.',
+        testPath: 'Tests/ExampleTests/ExampleTests.swift',
+        testContent: 'import XCTest\n@testable import Example\n\nfinal class ExampleTests: XCTestCase {\n  func testWorks() { XCTAssertEqual(Example.value(), "expected") }\n}\n',
+        implementationPath: 'Sources/Example/Example.swift',
+        implementationContent: 'public enum Example {\n  public static func value() -> String { ... }\n}\n',
+        fence: 'swift',
+      };
+    case 'c':
+      return {
+        language: 'c',
+        testInstruction: 'Use the repository native C test style. Prefer existing CMake/Make/Meson/Bazel test conventions and keep declarations in headers.',
+        testPath: 'tests/test_example.c',
+        testContent: '#include "example.h"\n#include <assert.h>\n\nint main(void) {\n  assert(example_value() == 42);\n  return 0;\n}\n',
+        implementationPath: 'src/example.c',
+        implementationContent: '#include "example.h"\n\nint example_value(void) {\n  ...\n}\n',
+        fence: 'c',
+      };
+    case 'cpp':
+      return {
+        language: 'cpp',
+        testInstruction: 'Use the repository native C++ test style. Prefer existing CMake/Make/Meson/Bazel test conventions and keep public declarations in headers.',
+        testPath: 'tests/example_test.cpp',
+        testContent: '#include "example.hpp"\n#include <cassert>\n\nint main() {\n  assert(example::value() == 42);\n}\n',
+        implementationPath: 'src/example.cpp',
+        implementationContent: '#include "example.hpp"\n\nnamespace example {\nint value() { ... }\n}\n',
+        fence: 'cpp',
+      };
+    case 'javascript':
+    default:
+      return {
+        language: 'javascript',
+        testInstruction: 'Use CommonJS (.cjs) with node:test and node:assert/strict.',
+        testPath: 'tests/unit/example.test.cjs',
+        testContent: "const test = require('node:test');\n...",
+        implementationPath: 'src/middleware/example.cjs',
+        implementationContent: "'use strict';\n...",
+        fence: 'javascript',
+      };
+  }
+}
+
+function buildLanguageTestCommand(language, testPaths = []) {
+  const paths = Array.isArray(testPaths)
+    ? testPaths.filter((entry) => typeof entry === 'string' && entry.trim().length > 0)
+    : [];
+  switch (language) {
+    case 'python':
+      return { argv: ['python3', '-m', 'pytest', ...paths] };
+    case 'rust':
+      return { argv: ['cargo', 'test'] };
+    case 'go':
+      return { argv: ['go', 'test', './...'] };
+    case 'ruby': {
+      const hasSpecPath = paths.some((entry) => entry.startsWith('spec/') || entry.includes('/spec/'));
+      if (hasSpecPath) return { argv: ['bundle', 'exec', 'rspec', ...paths] };
+      return { argv: ['bundle', 'exec', 'ruby', '-Itest', ...paths] };
+    }
+    case 'java':
+      return { argv: ['mvn', 'test'] };
+    case 'kotlin':
+      return { argv: ['./gradlew', 'test'] };
+    case 'csharp':
+      return { argv: ['dotnet', 'test'] };
+    case 'swift':
+      return { argv: ['swift', 'test'] };
+    case 'c':
+    case 'cpp':
+      return { argv: ['ctest', '--output-on-failure'] };
+    case 'typescript':
+    case 'javascript':
+    default:
+      return null;
+  }
+}
 
 /**
  * Build the prompt for Agent A (Spec Writer).
@@ -41,7 +285,7 @@ const { AdapterError } = require('./errors.cjs');
  * Tests MUST fail without implementation — they reference functions and files
  * that don't exist yet.
  */
-function buildSpecPrompt(feature, _adapter, exemplarContent) {
+function buildSpecPrompt(feature, adapter, exemplarContent) {
   if (feature === null || feature === undefined || typeof feature !== 'object' || Array.isArray(feature)) {
     const received = feature === null ? 'null' : feature === undefined ? 'undefined' : Array.isArray(feature) ? 'array' : typeof feature;
     throw new AdapterError(
@@ -67,6 +311,7 @@ function buildSpecPrompt(feature, _adapter, exemplarContent) {
       { fixHint: 'Ensure the feature object has a newSurface object with id, title, paths, testPaths, and invariants fields.' },
     );
   }
+  const guidance = buildLanguageBuildGuidance(inferBuildLanguage(feature, adapter));
   const lines = [];
 
   lines.push('You are Agent A — the Spec Writer in a TDD pipeline.');
@@ -112,7 +357,7 @@ function buildSpecPrompt(feature, _adapter, exemplarContent) {
   lines.push('Each operation must be a create_file that creates a test file.');
   lines.push('Tests MUST fail without implementation — they require/import functions and files that do not exist yet.');
   lines.push('Every acceptance criterion above must be covered by at least one test.');
-  lines.push('Use CommonJS (.cjs) with node:test and node:assert/strict.');
+  lines.push(guidance.testInstruction);
   lines.push('');
   lines.push('Example response:');
   lines.push('```json');
@@ -120,8 +365,8 @@ function buildSpecPrompt(feature, _adapter, exemplarContent) {
     operations: [
       {
         op: 'create_file',
-        path: 'tests/unit/example.test.cjs',
-        content: "const test = require('node:test');\\n...",
+        path: guidance.testPath,
+        content: guidance.testContent,
       },
     ],
   }, null, 2));
@@ -138,7 +383,7 @@ function buildSpecPrompt(feature, _adapter, exemplarContent) {
  * plus any insert_after/replace_exact for integration seams.
  * ALL tests must pass after the implementation is applied.
  */
-function buildImplementationPrompt(feature, _adapter, testContent, exemplarContent) {
+function buildImplementationPrompt(feature, adapter, testContent, exemplarContent) {
   if (feature === null || feature === undefined || typeof feature !== 'object' || Array.isArray(feature)) {
     const received = feature === null ? 'null' : feature === undefined ? 'undefined' : Array.isArray(feature) ? 'array' : typeof feature;
     throw new AdapterError(
@@ -173,6 +418,7 @@ function buildImplementationPrompt(feature, _adapter, testContent, exemplarConte
       { fixHint: 'Pass the test file content string produced by the red phase (extractTestContent output).' },
     );
   }
+  const guidance = buildLanguageBuildGuidance(inferBuildLanguage(feature, adapter));
   const lines = [];
 
   lines.push('You are Agent B — the Builder in a TDD pipeline.');
@@ -216,7 +462,7 @@ function buildImplementationPrompt(feature, _adapter, testContent, exemplarConte
 
   lines.push('## Failing Tests (written by Agent A)');
   lines.push('These tests currently fail because the implementation does not exist. Make them all pass:');
-  lines.push('```javascript');
+  lines.push(`\`\`\`${guidance.fence}`);
   lines.push(testContent);
   lines.push('```');
   lines.push('');
@@ -243,8 +489,8 @@ function buildImplementationPrompt(feature, _adapter, testContent, exemplarConte
     operations: [
       {
         op: 'create_file',
-        path: 'src/middleware/example.cjs',
-        content: "'use strict';\\n...",
+        path: guidance.implementationPath,
+        content: guidance.implementationContent,
       },
     ],
   }, null, 2));
@@ -476,6 +722,7 @@ async function runBuildPipeline(opts = {}) {
     adapterPath,
     repoRoot,
     proposerConfig,
+    liveAgentProvider,
     outputDir,
     maxRepairTurns = 3,
   } = opts;
@@ -527,12 +774,17 @@ async function runBuildPipeline(opts = {}) {
 
   // --- 3. Agent A: Generate test operations ---
   const specPrompt = buildSpecPrompt(feature, adapter, exemplarContent);
+  const buildLanguage = inferBuildLanguage(feature, adapter);
   let testOperations;
   try {
-    const specResponse = await callModel({
-      ...proposerConfig,
+    const specResponse = await callBuildAgent({
+      liveAgentProvider,
+      proposerConfig,
+      role: 'spec-writer',
+      language: buildLanguage,
       systemPrompt: 'You are a TDD spec writer. Output ONLY JSON.',
       userPrompt: specPrompt,
+      context: { featureId, phase: 'spec_generation' },
     });
     testOperations = parseOperationsResponse(specResponse.text, 'spec_generation');
   } catch (err) {
@@ -548,6 +800,7 @@ async function runBuildPipeline(opts = {}) {
       adapter,
       exemplarContent,
       proposerConfig,
+      liveAgentProvider,
       specPrompt,
       repoRoot: resolvedRepoRoot,
       maxRepairTurns,
@@ -562,10 +815,14 @@ async function runBuildPipeline(opts = {}) {
   const implPrompt = buildImplementationPrompt(feature, adapter, testContent, exemplarContent);
   let codeOperations;
   try {
-    const implResponse = await callModel({
-      ...proposerConfig,
+    const implResponse = await callBuildAgent({
+      liveAgentProvider,
+      proposerConfig,
+      role: 'implementation-builder',
+      language: buildLanguage,
       systemPrompt: 'You are a TDD implementation builder. Output ONLY JSON.',
       userPrompt: implPrompt,
+      context: { featureId, phase: 'implementation' },
     });
     codeOperations = parseOperationsResponse(implResponse.text, 'implementation');
   } catch (err) {
@@ -583,6 +840,7 @@ async function runBuildPipeline(opts = {}) {
       exemplarContent,
       testContent,
       proposerConfig,
+      liveAgentProvider,
       implPrompt,
       repoRoot: resolvedRepoRoot,
       maxRepairTurns,
@@ -627,9 +885,10 @@ async function runBuildPipeline(opts = {}) {
 async function runRedPhase({
   testOperations,
   feature,
-  adapter: _adapter,
+  adapter,
   exemplarContent: _exemplarContent,
   proposerConfig,
+  liveAgentProvider,
   specPrompt,
   repoRoot: _repoRoot,
   maxRepairTurns,
@@ -659,10 +918,13 @@ async function runRedPhase({
         null,
         `Test operations failed to apply: ${applyErr.message}`,
       );
-      const repairResponse = await callModel({
-        ...proposerConfig,
+      const repairResponse = await callBuildAgent({
+        liveAgentProvider,
+        proposerConfig,
+        role: 'spec-repair',
         systemPrompt: 'You are a TDD spec writer. Output ONLY JSON.',
         userPrompt: repairPrompt,
+        context: { phase: 'spec_generation_repair' },
       });
       currentTestOps = parseOperationsResponse(repairResponse.text, 'spec_generation');
       continue;
@@ -670,7 +932,9 @@ async function runRedPhase({
 
     // Run tests in the temp dir — they should ALL fail
     const testPaths = feature.newSurface.testPaths;
-    const testResult = runTestsInDir(testPaths, tmpDir);
+    const language = inferBuildLanguage(feature, adapter);
+    const testCommand = buildLanguageTestCommand(language, testPaths);
+    const testResult = runTestsInDir(testPaths, tmpDir, { testCommand });
 
     cleanupTempDir(tmpDir);
 
@@ -694,12 +958,15 @@ async function runRedPhase({
         'spec generation',
         specPrompt,
         testResult.output || '(no output)',
-        'No tests were detected. Ensure the test file uses node:test and contains at least one test() call.',
+        'No tests were detected. Ensure the generated test file uses the native test framework for this feature language and contains at least one test.',
       );
-      const repairResponse = await callModel({
-        ...proposerConfig,
+      const repairResponse = await callBuildAgent({
+        liveAgentProvider,
+        proposerConfig,
+        role: 'spec-repair',
         systemPrompt: 'You are a TDD spec writer. Output ONLY JSON.',
         userPrompt: repairPrompt,
+        context: { phase: 'spec_generation_repair' },
       });
       currentTestOps = parseOperationsResponse(repairResponse.text, 'spec_generation');
       continue;
@@ -722,10 +989,13 @@ async function runRedPhase({
       `${testResult.passed} test(s) passed without implementation — these tests are vacuous. ` +
       'Tests must import/require functions that do not exist yet so they fail at the module level.',
     );
-    const repairResponse = await callModel({
-      ...proposerConfig,
+    const repairResponse = await callBuildAgent({
+      liveAgentProvider,
+      proposerConfig,
+      role: 'spec-repair',
       systemPrompt: 'You are a TDD spec writer. Output ONLY JSON.',
       userPrompt: repairPrompt,
+      context: { phase: 'spec_generation_repair' },
     });
     currentTestOps = parseOperationsResponse(repairResponse.text, 'spec_generation');
   }
@@ -751,6 +1021,7 @@ async function runGreenPhase({
   exemplarContent: _exemplarContent,
   testContent: _testContent,
   proposerConfig,
+  liveAgentProvider,
   implPrompt,
   repoRoot: _repoRoot,
   maxRepairTurns,
@@ -785,10 +1056,13 @@ async function runGreenPhase({
         null,
         `Operations failed to apply: ${applyErr.message}`,
       );
-      const repairResponse = await callModel({
-        ...proposerConfig,
+      const repairResponse = await callBuildAgent({
+        liveAgentProvider,
+        proposerConfig,
+        role: 'implementation-repair',
         systemPrompt: 'You are a TDD implementation builder. Output ONLY JSON.',
         userPrompt: repairPrompt,
+        context: { phase: 'implementation_repair' },
       });
       currentCodeOps = parseOperationsResponse(repairResponse.text, 'implementation');
       continue;
@@ -796,6 +1070,8 @@ async function runGreenPhase({
 
     // Run delta validation
     const testPaths = feature.newSurface.testPaths;
+    const language = inferBuildLanguage(feature, adapter);
+    const testCommand = buildLanguageTestCommand(language, testPaths);
     const fullValidation = adapter.repo
       ? (adapter.repo.final_validation || adapter.repo.finalValidation || [])
       : [];
@@ -804,6 +1080,7 @@ async function runGreenPhase({
       baseDir,
       candidateDir,
       testPaths,
+      testCommand,
       fullValidation,
     });
 
@@ -830,10 +1107,13 @@ async function runGreenPhase({
       JSON.stringify(delta, null, 2),
       delta.reason || 'Delta validation failed — some tests still fail or existing tests broke.',
     );
-    const repairResponse = await callModel({
-      ...proposerConfig,
+    const repairResponse = await callBuildAgent({
+      liveAgentProvider,
+      proposerConfig,
+      role: 'implementation-repair',
       systemPrompt: 'You are a TDD implementation builder. Output ONLY JSON.',
       userPrompt: repairPrompt,
+      context: { phase: 'implementation_repair' },
     });
     currentCodeOps = parseOperationsResponse(repairResponse.text, 'implementation');
   }
@@ -901,6 +1181,9 @@ function buildFailureResult(featureId, outputDir, err) {
 // ---------------------------------------------------------------------------
 
 module.exports = {
+  inferBuildLanguage,
+  buildLanguageBuildGuidance,
+  buildLanguageTestCommand,
   buildSpecPrompt,
   buildImplementationPrompt,
   buildRepairPrompt,

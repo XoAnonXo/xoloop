@@ -93,13 +93,13 @@ async function runCommand(argv) {
   const results = [];
   for (const benchmarkCase of suite.cases) {
     const r = runBenchmarkCase(benchmarkCase, { cwd: process.cwd() });
-    results.push({ name: benchmarkCase.name, ...r });
+    results.push({ name: benchmarkCase.name || benchmarkCase.id, ...r });
   }
   console.log('\n=== Benchmark Summary ===');
   for (const r of results) {
-    console.log(`${r.name}: ${r.verdict}  (hash ${r.outputMatch && r.outputMatch.actualSha256 ? r.outputMatch.actualSha256.slice(0, 12) : 'n/a'})`);
+    console.log(`${r.name || r.id}: ${r.verdict}  (hash ${r.outputMatch && r.outputMatch.actualSha256 ? r.outputMatch.actualSha256.slice(0, 12) : 'n/a'})`);
   }
-  const failed = results.filter((r) => r.verdict !== 'pass').length;
+  const failed = results.filter((r) => String(r.verdict || '').toLowerCase() !== 'pass').length;
   process.exit(failed > 0 ? 1 : 0);
 }
 

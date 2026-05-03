@@ -305,6 +305,87 @@ function summarizeBySeverity(findings) {
   return counts;
 }
 
+function normalizeAuditTargetFile(cwd, filePath) {
+  if (typeof filePath !== 'string' || filePath.length === 0) return null;
+  const absolute = path.isAbsolute(filePath) ? filePath : path.resolve(cwd || process.cwd(), filePath);
+  return fs.existsSync(absolute) && fs.statSync(absolute).isFile() ? absolute : null;
+}
+
+function lineOf(source, index) {
+  if (!Number.isFinite(index) || index < 0) return undefined;
+  return source.slice(0, index).split(/\r?\n/).length;
+}
+
+function buildStaticAuditFindings(target) {
+  const cwd = target && typeof target.cwd === 'string' ? target.cwd : process.cwd();
+  const files = Array.isArray(target && target.files) ? target.files : [];
+  const findings = [];
+  for (const entry of files) {
+    const absolute = normalizeAuditTargetFile(cwd, entry);
+    if (!absolute || path.extname(absolute).toLowerCase() !== '.java') continue;
+    const source = fs.readFileSync(absolute, 'utf8');
+    const rel = path.relative(cwd, absolute) || absolute;
+    findings.push(...buildJavaStaticAuditFindings(source, rel));
+  }
+  return findings;
+}
+
+function buildJavaStaticAuditFindings(source, file) {
+  const findings = [];
+  const sourceWithoutComments = source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*$/gm, '');
+
+  // A common rate-limiter/cache failure mode: every new caller key is retained
+  // forever. Model audit can reason about this, but the runner should not need
+  // a model to catch the obvious "HashMap + computeIfAbsent + no cap/evict"
+  // shape in Java dogfood targets.
+  const hasHashMapState = /\bMap\s*<[^>]+>\s+\w+\s*=\s*new\s+HashMap\s*<\s*>\s*\(/.test(sourceWithoutComments)
+    || /\bnew\s+HashMap\s*<\s*>\s*\(/.test(sourceWithoutComments);
+  const addsBucketsByKey = /\.computeIfAbsent\s*\(/.test(sourceWithoutComments) || /\.put\s*\([^,]+,\s*new\b/.test(sourceWithoutComments);
+  const hasBoundOrEviction = /\bmax(?:imum)?(?:Tracked)?(?:Keys|Entries|Size)\b/i.test(sourceWithoutComments)
+    || /\bevict\w*\s*\(/i.test(sourceWithoutComments)
+    || /\.remove\s*\(/.test(sourceWithoutComments)
+    || /\bexpire\w*\s*\(/i.test(sourceWithoutComments);
+  if (hasHashMapState && addsBucketsByKey && !hasBoundOrEviction) {
+    const index = source.search(/new\s+HashMap\s*<\s*>\s*\(/);
+    findings.push({
+      severity: 'P2',
+      file,
+      line: lineOf(source, index),
+      issue: 'State map can grow without a bound or eviction path when new keys are observed.',
+      fixHint: 'Add a maximum tracked-key/entry limit, eviction, expiration, or document and enforce a bounded lifecycle.',
+      source: 'static-java-audit',
+    });
+  }
+
+  // Public result objects with several correlated primitive fields can expose
+  // contradictory states that the main implementation never returns. For Java
+  // this is most visible in decision/result types with public constructors;
+  // static factories make the valid states explicit.
+  const decisionClass = /\b(?:public\s+)?(?:final\s+)?class\s+([A-Z]\w*)\b/g;
+  for (const match of source.matchAll(decisionClass)) {
+    if (!/(?:Decision|Result|Outcome)$/.test(match[1])) continue;
+    const ctor = new RegExp(`\\bpublic\\s+${match[1]}\\s*\\(([^)]*)\\)`).exec(source.slice(match.index));
+    if (!ctor) continue;
+    const params = ctor[1] || '';
+    const correlatedPrimitiveCount = (params.match(/\b(?:boolean|int|long|double|float)\s+\w+/g) || []).length;
+    const hasStaticFactories = /\bpublic\s+static\s+\1\s+\w+\s*\(/.test(source);
+    if (correlatedPrimitiveCount >= 2 && !hasStaticFactories) {
+      findings.push({
+        severity: 'P2',
+        file,
+        line: lineOf(source, match.index),
+        issue: `${match[1]} exposes a public constructor for correlated primitive state, allowing callers to create contradictory domain states.`,
+        fixHint: 'Make the constructor private and expose named factories for each valid state.',
+        source: 'static-java-audit',
+      });
+    }
+  }
+
+  return findings;
+}
+
 async function runAuditFixLoop(options = {}) {
   const target = options.target;
   if (!target || typeof target !== 'object') {
@@ -315,8 +396,46 @@ async function runAuditFixLoop(options = {}) {
       { fixHint: 'Pass options.target = { cwd, files: [...], description } at minimum.' },
     );
   }
-  const callAuditor = options.callAuditor;
-  const callFixer = options.callFixer;
+  const liveAgentProvider = options.liveAgentProvider;
+  const callAuditor = options.callAuditor || (liveAgentProvider && typeof liveAgentProvider.call === 'function'
+    ? async (input) => {
+        const response = await liveAgentProvider.call({
+          mode: 'audit',
+          role: 'auditor',
+          language: target.language || null,
+          requestKind: 'audit',
+          systemPrompt: 'You are a code auditor. Return JSON only.',
+          userPrompt: JSON.stringify({
+            target: input.target,
+            history: input.history,
+            round: input.round,
+            returnShape: { findings: [] },
+          }, null, 2),
+          schema: { type: 'json_object' },
+        });
+        return JSON.parse(response.text);
+      }
+    : null);
+  const callFixer = options.callFixer || (liveAgentProvider && typeof liveAgentProvider.call === 'function'
+    ? async (input) => {
+        const response = await liveAgentProvider.call({
+          mode: 'audit',
+          role: 'fixer',
+          language: target.language || null,
+          requestKind: 'fix',
+          systemPrompt: 'You are a code fixer. Return JSON only.',
+          userPrompt: JSON.stringify({
+            findings: input.findings,
+            target: input.target,
+            history: input.history,
+            round: input.round,
+            returnShape: { changeSet: [] },
+          }, null, 2),
+          schema: { type: 'json_object' },
+        });
+        return JSON.parse(response.text);
+      }
+    : null);
   if (typeof callAuditor !== 'function') {
     throw new AdapterError(
       'AUDIT_CALLER_REQUIRED',
@@ -464,11 +583,22 @@ async function runAuditFixLoop(options = {}) {
   const history = [];
 
   for (let round = 1; round <= maxRounds; round += 1) {
-    const audit = await callAuditor({
+    const modelAudit = await callAuditor({
       target,
       history: history.slice(),
       round,
     });
+    const staticFindings = options.enableStaticAudit === false
+      ? []
+      : buildStaticAuditFindings(target);
+    const audit = {
+      ...(modelAudit || {}),
+      findings: [
+        ...staticFindings,
+        ...((modelAudit && Array.isArray(modelAudit.findings)) ? modelAudit.findings : []),
+      ],
+      staticFindings,
+    };
     const findings = (audit && Array.isArray(audit.findings)) ? audit.findings : [];
     const blocking = filterBlockingFindings(findings, severityFloor);
     const summary = summarizeBySeverity(findings);
@@ -836,6 +966,8 @@ module.exports = {
   DEFAULT_SEVERITY_FLOOR,
   SEVERITY_RANK,
   checkChangeSetPathScope,
+  buildJavaStaticAuditFindings,
+  buildStaticAuditFindings,
   filterBlockingFindings,
   isBlocking,
   runAuditFixLoop,

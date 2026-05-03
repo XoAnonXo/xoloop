@@ -22,11 +22,15 @@
  *   .js .cjs .mjs .ts .tsx .jsx → JavaScript/TypeScript
  *   .py → Python
  *   .rb → Ruby (exports = non-underscore constants/methods at top level)
- *   .go .rs .java → flagged as "unknown" → fail-safe refuse export deletions
+ *   .go → Go exported top-level identifiers
+ *   .rs → Rust pub items
+ *   .java .kt .cs .swift .c .h .cpp .hpp → public API heuristics
+ *   other languages → flagged as "unknown" → fail-safe refuse export deletions
  */
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const TEST_FILE_PATTERNS = [
   /(^|[\/\\])__tests__[\/\\]/,
@@ -48,7 +52,14 @@ function detectLanguage(filePath) {
   if (['.js', '.cjs', '.mjs', '.ts', '.tsx', '.jsx'].includes(ext)) return 'javascript';
   if (ext === '.py') return 'python';
   if (ext === '.rb') return 'ruby';
-  if (['.go', '.rs', '.java', '.kt', '.swift'].includes(ext)) return 'unknown-strict';
+  if (ext === '.go') return 'go';
+  if (ext === '.rs') return 'rust';
+  if (ext === '.java') return 'java';
+  if (['.kt', '.kts'].includes(ext)) return 'kotlin';
+  if (ext === '.cs') return 'csharp';
+  if (ext === '.swift') return 'swift';
+  if (['.c', '.h'].includes(ext)) return 'c';
+  if (['.cc', '.cpp', '.cxx', '.hpp', '.hh'].includes(ext)) return 'cpp';
   return 'unknown';
 }
 
@@ -119,6 +130,9 @@ function scanJsExports(source) {
  *   - Otherwise, every module-level def/class not prefixed with _ is exported
  */
 function scanPyExports(source) {
+  const astExports = scanPyExportsWithAst(source);
+  if (astExports !== null) return astExports;
+
   const exports = new Set();
 
   // Check for __all__ first
@@ -151,6 +165,9 @@ function scanPyExports(source) {
  * with _. Classes and modules are also "exported".
  */
 function scanRbExports(source) {
+  const ripperExports = scanRbExportsWithRipper(source);
+  if (ripperExports !== null) return ripperExports;
+
   const exports = new Set();
   const defRe = /^def\s+(self\.)?([A-Za-z][\w]*[!?=]?)/gm;
   for (const m of source.matchAll(defRe)) {
@@ -166,6 +183,163 @@ function scanRbExports(source) {
   return exports;
 }
 
+function scanPyExportsWithAst(source) {
+  const script = [
+    'import ast, json, sys',
+    'source = sys.stdin.read()',
+    'tree = ast.parse(source)',
+    'exports = []',
+    'all_names = None',
+    'for node in tree.body:',
+    '    if isinstance(node, ast.Assign):',
+    "        if any(isinstance(t, ast.Name) and t.id == '__all__' for t in node.targets):",
+    '            if isinstance(node.value, (ast.List, ast.Tuple)):',
+    '                all_names = [elt.value for elt in node.value.elts if isinstance(elt, ast.Constant) and isinstance(elt.value, str)]',
+    '    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):',
+    "        if not node.name.startswith('_'): exports.append(node.name)",
+    'print(json.dumps(all_names if all_names is not None else exports))',
+  ].join('\n');
+  const result = spawnSync('python3', ['-c', script], {
+    input: source,
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.status !== 0) return null;
+  try {
+    const names = JSON.parse(result.stdout || '[]');
+    return new Set(Array.isArray(names) ? names.filter((name) => typeof name === 'string') : []);
+  } catch (_err) {
+    return null;
+  }
+}
+
+function scanRbExportsWithRipper(source) {
+  const script = [
+    "require 'json'",
+    "require 'ripper'",
+    'source = STDIN.read',
+    'sexp = Ripper.sexp(source)',
+    'exports = []',
+    'walk = lambda do |node, depth|',
+    '  next unless node.is_a?(Array)',
+    '  type = node[0]',
+    "  if depth == 0 && type == :def && node[1].is_a?(Array) && node[1][1].is_a?(String)",
+    '    name = node[1][1]',
+    "    exports << name unless name.start_with?('_')",
+    "  elsif depth == 0 && type == :defs && node[3].is_a?(Array) && node[3][1].is_a?(String)",
+    '    name = node[3][1]',
+    "    exports << name unless name.start_with?('_')",
+    "  elsif depth == 0 && [:class, :module].include?(type)",
+    '    name_node = node[1]',
+    "    names = name_node.flatten.select { |v| v.is_a?(String) && v =~ /^[A-Z]/ }",
+    '    exports << names.join("::") unless names.empty?',
+    '  end',
+    '  node.each_with_index do |child, index|',
+    '    next if index == 0',
+    '    walk.call(child, depth + 1) if child.is_a?(Array)',
+    '  end',
+    'end',
+    'if sexp && sexp[0] == :program && sexp[1].is_a?(Array)',
+    '  sexp[1].each { |child| walk.call(child, 0) }',
+    'end',
+    'source.scan(/^([A-Z][A-Z0-9_]*)\\s*=/) { |m| exports << m[0] }',
+    'puts JSON.generate(exports.uniq)',
+  ].join('\n');
+  const result = spawnSync('ruby', ['-e', script], {
+    input: source,
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.status !== 0) return null;
+  try {
+    const names = JSON.parse(result.stdout || '[]');
+    return new Set(Array.isArray(names) ? names.filter((name) => typeof name === 'string') : []);
+  } catch (_err) {
+    return null;
+  }
+}
+
+function scanGoExports(source) {
+  const exports = new Set();
+  const exportedName = '([A-Z][A-Za-z0-9_]*)';
+  const patterns = [
+    new RegExp(`^func\\s+(?:\\([^)]*\\)\\s*)?${exportedName}\\s*\\(`, 'gm'),
+    new RegExp(`^type\\s+${exportedName}\\b`, 'gm'),
+    new RegExp(`^(?:var|const)\\s+${exportedName}\\b`, 'gm'),
+  ];
+  for (const re of patterns) {
+    for (const m of source.matchAll(re)) exports.add(m[1]);
+  }
+  return exports;
+}
+
+function scanRustExports(source) {
+  const exports = new Set();
+  const patterns = [
+    /\bpub\s+(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\b/g,
+    /\bpub\s+(?:struct|enum|trait|type|const|static|mod)\s+([A-Za-z_][A-Za-z0-9_]*)\b/g,
+  ];
+  for (const re of patterns) {
+    for (const m of source.matchAll(re)) exports.add(m[1]);
+  }
+  return exports;
+}
+
+function scanJvmExports(source, language) {
+  const exports = new Set();
+  const patterns = language === 'kotlin'
+    ? [
+      /\b(?:public\s+)?(?:class|interface|object|enum\s+class|data\s+class)\s+([A-Z][A-Za-z0-9_]*)\b/g,
+      /\b(?:public\s+)?fun\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
+    ]
+    : [
+      /\bpublic\s+(?:final\s+|abstract\s+)?(?:class|interface|enum|record)\s+([A-Z][A-Za-z0-9_]*)\b/g,
+      /\bpublic\s+(?:static\s+)?(?:final\s+)?[A-Za-z_][\w<>, ?\[\]]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
+    ];
+  for (const re of patterns) {
+    for (const m of source.matchAll(re)) exports.add(m[1]);
+  }
+  return exports;
+}
+
+function scanCSharpExports(source) {
+  const exports = new Set();
+  const patterns = [
+    /\bpublic\s+(?:class|interface|struct|enum|record)\s+([A-Z][A-Za-z0-9_]*)\b/g,
+    /\bpublic\s+(?:static\s+)?(?:async\s+)?[A-Za-z_][\w<>, ?\[\]]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
+  ];
+  for (const re of patterns) {
+    for (const m of source.matchAll(re)) exports.add(m[1]);
+  }
+  return exports;
+}
+
+function scanSwiftExports(source) {
+  const exports = new Set();
+  const patterns = [
+    /\b(?:public|open)\s+(?:final\s+)?(?:class|struct|enum|protocol|actor)\s+([A-Z][A-Za-z0-9_]*)\b/g,
+    /\b(?:public|open)\s+(?:static\s+)?func\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
+  ];
+  for (const re of patterns) {
+    for (const m of source.matchAll(re)) exports.add(m[1]);
+  }
+  return exports;
+}
+
+function scanCFamilyExports(source) {
+  const exports = new Set();
+  const patterns = [
+    /^\s*(?:extern\s+)?(?:[A-Za-z_][\w:<>]*\s+)+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*;/gm,
+    /^\s*(?:class|struct|enum)\s+([A-Z][A-Za-z0-9_]*)\b/gm,
+  ];
+  for (const re of patterns) {
+    for (const m of source.matchAll(re)) exports.add(m[1]);
+  }
+  return exports;
+}
+
 function scanExports(filePath) {
   const language = detectLanguage(filePath);
   if (!fs.existsSync(filePath)) {
@@ -176,6 +350,12 @@ function scanExports(filePath) {
   if (language === 'javascript') exports = scanJsExports(source);
   else if (language === 'python') exports = scanPyExports(source);
   else if (language === 'ruby') exports = scanRbExports(source);
+  else if (language === 'go') exports = scanGoExports(source);
+  else if (language === 'rust') exports = scanRustExports(source);
+  else if (language === 'java' || language === 'kotlin') exports = scanJvmExports(source, language);
+  else if (language === 'csharp') exports = scanCSharpExports(source);
+  else if (language === 'swift') exports = scanSwiftExports(source);
+  else if (language === 'c' || language === 'cpp') exports = scanCFamilyExports(source);
   else exports = new Set(); // unknown — caller decides fail-safe behavior
   return { exports, language, exists: true, source };
 }
@@ -199,6 +379,8 @@ function measureComplexity(filePath) {
     if (!line) continue;
     if (language === 'python' && line.startsWith('#')) continue;
     if (language === 'ruby' && line.startsWith('#')) continue;
+  if (language === 'rust' && line.startsWith('//')) continue;
+    if (['java', 'kotlin', 'csharp', 'swift', 'c', 'cpp'].includes(language) && (line.startsWith('//') || line.startsWith('/*') || line.startsWith('*'))) continue;
     if ((language === 'javascript') && (line.startsWith('//') || line.startsWith('/*') || line.startsWith('*'))) continue;
     sloc += 1;
   }
@@ -333,6 +515,12 @@ function getExportsForLanguage(source, language) {
   if (language === 'javascript') return scanJsExports(source);
   if (language === 'python') return scanPyExports(source);
   if (language === 'ruby') return scanRbExports(source);
+  if (language === 'go') return scanGoExports(source);
+  if (language === 'rust') return scanRustExports(source);
+  if (language === 'java' || language === 'kotlin') return scanJvmExports(source, language);
+  if (language === 'csharp') return scanCSharpExports(source);
+  if (language === 'swift') return scanSwiftExports(source);
+  if (language === 'c' || language === 'cpp') return scanCFamilyExports(source);
   return new Set();
 }
 
@@ -367,6 +555,33 @@ function hasDefinition(source, name, language) {
     ];
     return patterns.some((re) => re.test(source));
   }
+  if (language === 'go') {
+    const patterns = [
+      new RegExp(`^func\\s+(?:\\([^)]*\\)\\s*)?${escaped}\\s*\\(`, 'm'),
+      new RegExp(`^type\\s+${escaped}\\b`, 'm'),
+      new RegExp(`^(?:var|const)\\s+${escaped}\\b`, 'm'),
+    ];
+    return patterns.some((re) => re.test(source));
+  }
+  if (language === 'rust') {
+    const patterns = [
+      new RegExp(`\\bpub\\s+(?:async\\s+)?fn\\s+${escaped}\\b`),
+      new RegExp(`\\bpub\\s+(?:struct|enum|trait|type|const|static|mod)\\s+${escaped}\\b`),
+    ];
+    return patterns.some((re) => re.test(source));
+  }
+  if (language === 'java' || language === 'kotlin') {
+    return scanJvmExports(source, language).has(name);
+  }
+  if (language === 'csharp') {
+    return scanCSharpExports(source).has(name);
+  }
+  if (language === 'swift') {
+    return scanSwiftExports(source).has(name);
+  }
+  if (language === 'c' || language === 'cpp') {
+    return scanCFamilyExports(source).has(name);
+  }
   return true; // unknown language — fail-safe assume definition exists
 }
 
@@ -395,4 +610,10 @@ module.exports = {
   aggregateMetric,
   validateSimplifyProposal,
   verifyMetricImprovement,
+  scanPyExportsWithAst,
+  scanRbExportsWithRipper,
+  scanJvmExports,
+  scanCSharpExports,
+  scanSwiftExports,
+  scanCFamilyExports,
 };
