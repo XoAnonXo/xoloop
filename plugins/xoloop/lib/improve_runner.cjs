@@ -79,7 +79,7 @@ function parseImproveOptions(argv) {
       opts.dryRun = true;
     } else if (arg === '--cwd' && i + 1 < args.length) {
       opts.cwd = args[++i];
-    } else if (arg === '--target' && i + 1 < args.length) {
+    } else if ((arg === '--target' || arg === '--surface') && i + 1 < args.length) {
       opts.targetPaths.push(args[++i]);
     } else if (arg === '--model' && i + 1 < args.length) {
       opts.model = args[++i];
@@ -234,7 +234,9 @@ function extractTargetPaths(benchmark, cwd) {
   const javaMainClassPattern = /(?:^|\s)-Dexec\.mainClass=([A-Za-z_][\w.]*)/g;
 
   for (const c of (benchmark.cases || [])) {
-    const command = c.entry_point && c.entry_point.command;
+    const command = typeof c.entry_point === 'string'
+      ? c.entry_point
+      : c.entry_point && c.entry_point.command;
     if (typeof command !== 'string') continue;
     requirePattern.lastIndex = 0;
     let match;

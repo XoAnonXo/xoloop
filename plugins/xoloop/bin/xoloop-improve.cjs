@@ -1,8 +1,4 @@
 #!/usr/bin/env node
-/**
- * xoloop-improve.cjs — thin CLI wrapper for benchmark-driven iteration.
- */
-
 'use strict';
 
 const {
@@ -23,20 +19,22 @@ async function main() {
   }
   const cwd = process.cwd();
   const surface = parseFlag(argv, '--surface', null);
+  const target = surface || parseFlag(argv, '--target', null);
   const allowDirty = hasFlag(argv, '--allow-dirty');
 
   ensureConfig(cwd);
-  enforceDirtyOverlapGate(cwd, surface, allowDirty);
+  enforceDirtyOverlapGate(cwd, target, allowDirty);
 
   const options = parseImproveOptions(argv);
   const summary = await runImproveLoop(options);
 
   console.log('\n=== Improve Summary ===');
   console.log(`Rounds completed: ${summary.rounds}`);
-  console.log(`Metric baseline:  ${summary.baselineMetric}`);
-  console.log(`Metric final:     ${summary.finalMetric}`);
-  console.log(`Improvement:      ${summary.improvementPct}%`);
-  console.log(`Stop reason:      ${summary.stopReason}`);
+  console.log(`Improvements:     ${summary.improvements}`);
+  console.log(`Regressions:      ${summary.regressions}`);
+  console.log(`Neutrals:         ${summary.neutrals}`);
+  console.log(`Saturated:        ${summary.saturated}`);
+  if (summary.error) console.log(`Error:            ${summary.error}`);
   process.exit(summary.error ? 1 : 0);
 }
 

@@ -1,10 +1,4 @@
 #!/usr/bin/env node
-/**
- * xoloop-build.cjs — thin CLI wrapper for serialized TDD build pipeline.
- *
- * Subcommands: run | review | promote
- */
-
 'use strict';
 
 const {

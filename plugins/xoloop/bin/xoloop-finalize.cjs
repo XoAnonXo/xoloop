@@ -1,31 +1,4 @@
 #!/usr/bin/env node
-/**
- * xoloop-finalize.cjs — turn a noisy autoresearch session into clean,
- * independent branches. Inspired by pi-autoresearch/autoresearch-finalize.
- *
- * Reads `.xoloop/session.jsonl`, filters to entries with outcome='keep',
- * groups them by non-overlapping file sets, and proposes one independent
- * branch per group. Each branch:
- *   - starts from the pre-session merge-base
- *   - contains only commits that touch files inside the group
- *   - has a summary commit message with the kept proposals' rationales
- *     and any metric improvements
- *
- * Why non-overlapping? Branches that share files can't be merged
- * independently without conflicts. Grouping by disjoint file sets gives
- * operators a reviewable sequence where each branch is a self-contained
- * PR.
- *
- * Usage:
- *   xoloop-finalize [--dry-run] [--base-ref main] [--branch-prefix xoloop/]
- *                   [--ledger <path>] [--repo-root <path>]
- *
- * Modes:
- *   --dry-run (default when called from a skill) — print the proposed
- *     grouping, don't touch git. Ensure humans approve before branching.
- *   (default)                                    — actually create branches.
- */
-
 'use strict';
 
 const fs = require('node:fs');
@@ -95,8 +68,7 @@ function buildGroups(ledger) {
   for (let i = 0; i < kept.length; i += 1) {
     for (let j = i + 1; j < kept.length; j += 1) {
       const setI = new Set(kept[i].filesTouched || []);
-      const setJ = new Set(kept[j].filesTouched || []);
-      const hasOverlap = [...setJ].some((f) => setI.has(f));
+      const hasOverlap = (kept[j].filesTouched || []).some((f) => setI.has(f));
       if (hasOverlap) union(i, j);
     }
   }

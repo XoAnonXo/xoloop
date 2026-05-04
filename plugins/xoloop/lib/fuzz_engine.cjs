@@ -19,23 +19,13 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 
-const fc = require('fast-check');
+let fc;
+try {
+  fc = require('fast-check');
+} catch (_err) {
+  fc = require('./fast_check_lite.cjs');
+}
 const { AdapterError } = require('./errors.cjs');
-
-// ---------------------------------------------------------------------------
-// Known error codes that indicate an expected (valid) rejection
-// ---------------------------------------------------------------------------
-
-const KNOWN_ADAPTER_CODES = new Set([
-  'MISSING_API_KEY',
-  'INVALID_ARGUMENT',
-  'PROPOSAL_MODE_INVALID',
-  'ANCHOR_NOT_FOUND',
-  'FUZZ_MODULE_PATH_REQUIRED',
-  'FUZZ_MODULE_NOT_FOUND',
-  'FUZZ_INVALID_OPTIONS',
-  'ADAPTER_ERROR',
-]);
 
 /**
  * Decides whether a thrown error is an expected (controlled) rejection or a

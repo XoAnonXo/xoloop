@@ -1,10 +1,4 @@
 #!/usr/bin/env node
-/**
- * xoloop-overnight.cjs — thin CLI wrapper for the batch orchestrator.
- *
- * Subcommands: run | xo | inspect | promote | cleanup
- */
-
 'use strict';
 
 const path = require('node:path');
@@ -69,6 +63,21 @@ function resolveBatchDir(options) {
   return path.resolve(repoRoot, reportDir, options.batchId);
 }
 
+const STRING_FLAGS = {
+  '--repo-root': 'repoRoot',
+  '--adapter': 'adapterPath',
+  '--objective': 'objectivePath',
+  '--batch-dir': 'batchDir',
+  '--batch-id': 'batchId',
+  '--surface': 'surfaceId',
+  '--proposal-mode': 'proposalMode',
+  '--xo-phases': 'xoPhases',
+};
+const NUMBER_FLAGS = {
+  '--attempt-limit': 'attemptLimit',
+  '--max-attempts': 'maxTotalAttempts',
+};
+
 function parseArgs(argv) {
   const options = {
     command: 'run',
@@ -85,23 +94,20 @@ function parseArgs(argv) {
     xoPhases: null,
   };
   const tokens = argv.slice();
-  if (tokens.length && !tokens[0].startsWith('--')) {
-    options.command = tokens.shift().toLowerCase();
-  }
+  if (tokens.length && !tokens[0].startsWith('--')) options.command = tokens.shift().toLowerCase();
   for (let i = 0; i < tokens.length; i += 1) {
-    const t = tokens[i];
+    const flag = tokens[i];
     const next = tokens[i + 1];
-    if (t === '--repo-root') { options.repoRoot = String(next || '').trim() || options.repoRoot; i += 1; }
-    else if (t === '--adapter') { options.adapterPath = String(next || '').trim() || null; i += 1; }
-    else if (t === '--objective') { options.objectivePath = String(next || '').trim() || null; i += 1; }
-    else if (t === '--batch-dir') { options.batchDir = String(next || '').trim() || null; i += 1; }
-    else if (t === '--batch-id') { options.batchId = String(next || '').trim() || null; i += 1; }
-    else if (t === '--attempt-limit') { options.attemptLimit = Number(next || 0) || null; i += 1; }
-    else if (t === '--max-attempts') { options.maxTotalAttempts = Number(next || 0) || null; i += 1; }
-    else if (t === '--surface') { options.surfaceId = String(next || '').trim() || null; i += 1; }
-    else if (t === '--proposal-mode') { options.proposalMode = String(next || '').trim().toLowerCase() || null; i += 1; }
-    else if (t === '--xo-phases') { options.xoPhases = String(next || '').trim() || null; i += 1; }
-    else if (t === '--allow-dirty') { options.allowDirty = true; }
+    if (STRING_FLAGS[flag]) {
+      const value = String(next || '').trim();
+      options[STRING_FLAGS[flag]] = flag === '--proposal-mode' ? value.toLowerCase() || null : value || options[STRING_FLAGS[flag]];
+      i += 1;
+    } else if (NUMBER_FLAGS[flag]) {
+      options[NUMBER_FLAGS[flag]] = Number(next || 0) || null;
+      i += 1;
+    } else if (flag === '--allow-dirty') {
+      options.allowDirty = true;
+    }
   }
   return options;
 }

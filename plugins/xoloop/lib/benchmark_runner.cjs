@@ -1,6 +1,7 @@
 'use strict';
 
 const { spawnSync } = require('node:child_process');
+const crypto = require('node:crypto');
 const { createMeter, recordMetrics, checkBounds } = require('./benchmark_meter.cjs');
 const { matchOutput } = require('./benchmark_matcher.cjs');
 const { AdapterError } = require('./errors.cjs');
@@ -24,7 +25,9 @@ function runBenchmarkCase(benchmarkCase, options = {}) {
   }
   const safeOptions = (options !== null && typeof options === 'object') ? options : {};
   const cwd = safeOptions.cwd || process.cwd();
-  const command = benchmarkCase.entry_point && benchmarkCase.entry_point.command;
+  const command = typeof benchmarkCase.entry_point === 'string'
+    ? benchmarkCase.entry_point
+    : benchmarkCase.entry_point && benchmarkCase.entry_point.command;
 
   if (!command) {
     return {
@@ -55,24 +58,53 @@ function runBenchmarkCase(benchmarkCase, options = {}) {
 
   // Coerce possibly-null stdout to a safe string once
   const rawStdout = result.stdout || '';
+  const actualSha256 = crypto.createHash('sha256').update(rawStdout).digest('hex');
 
-  // Parse stdout as JSON
-  let actualOutput;
-  try {
-    actualOutput = JSON.parse(rawStdout.trim());
-  } catch (_err) {
+  if (result.status !== 0) {
     return {
       verdict: 'BENCHMARK_VIOLATION',
       metrics,
       outputMatch: {
         verdict: 'fail',
-        diff: `failed to parse stdout as JSON: ${rawStdout.slice(0, 200)}`,
+        actualSha256,
+        diff: `entry_point exited ${result.status === null ? 1 : result.status}: ${String(result.stderr || '').slice(0, 200)}`,
       },
     };
   }
 
-  // Match output against expected
-  const outputMatch = matchOutput(actualOutput, benchmarkCase.expected_output);
+  let outputMatch;
+  if (typeof benchmarkCase.expected_output_sha256 === 'string') {
+    const expectedSha256 = benchmarkCase.expected_output_sha256.trim().toLowerCase();
+    outputMatch = {
+      verdict: actualSha256 === expectedSha256 ? 'pass' : 'fail',
+      actualSha256,
+      expectedSha256,
+      diff: actualSha256 === expectedSha256
+        ? null
+        : `expected sha256 ${expectedSha256}, got ${actualSha256}`,
+    };
+  } else {
+    // Parse stdout as JSON for structured expected_output matching.
+    let actualOutput;
+    try {
+      actualOutput = JSON.parse(rawStdout.trim());
+    } catch (_err) {
+      return {
+        verdict: 'BENCHMARK_VIOLATION',
+        metrics,
+        outputMatch: {
+          verdict: 'fail',
+          actualSha256,
+          diff: `failed to parse stdout as JSON: ${rawStdout.slice(0, 200)}`,
+        },
+      };
+    }
+
+    outputMatch = {
+      actualSha256,
+      ...matchOutput(actualOutput, benchmarkCase.expected_output),
+    };
+  }
 
   // Check bounds
   const boundsMatch = checkBounds(metrics, benchmarkCase.bounds || {});

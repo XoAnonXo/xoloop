@@ -4,17 +4,30 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { AdapterError } = require('./errors.cjs');
 
-// ---------------------------------------------------------------------------
-// parseBuildCommand — parse CLI argv into a structured command object
-// ---------------------------------------------------------------------------
+const COMMAND_ALIASES = {
+  run: 'build',
+  promote: 'approve',
+};
 
-/**
- * Parse a build CLI argument vector (after stripping node + script path).
- *
- * @param {string[]} argv - Arguments, e.g. ['build', 'feature.yaml', '--adapter', 'overnight.yaml']
- * @returns {{ command: string, featurePath?: string, featureId?: string,
- *             reason?: string, feedback?: string, adapterPath: string }}
- */
+const VALUE_FLAGS = {
+  '--adapter': 'adapterPath',
+  '--reason': 'reason',
+  '--feedback': 'feedback',
+  '--repo-root': 'repoRoot',
+};
+
+function normalizeBuildCommandName(command) {
+  return COMMAND_ALIASES[command] || command;
+}
+
+function repoRootFor(cmd) {
+  return cmd.repoRoot || process.cwd();
+}
+
+function reportsDirFor(cmd) {
+  return path.join(repoRootFor(cmd), 'reports', 'features');
+}
+
 function parseBuildCommand(argv) {
   if (!Array.isArray(argv)) {
     throw new AdapterError(
@@ -46,7 +59,7 @@ function parseBuildCommand(argv) {
 
   // First positional arg is the subcommand
   if (tokens.length > 0 && !tokens[0].startsWith('--')) {
-    result.command = tokens.shift();
+    result.command = normalizeBuildCommandName(tokens.shift());
   }
 
   // Second positional arg depends on subcommand
@@ -59,38 +72,16 @@ function parseBuildCommand(argv) {
     }
   }
 
-  // Named flags
   for (let i = 0; i < tokens.length; i += 1) {
-    const token = tokens[i];
-    if (token === '--adapter' && i + 1 < tokens.length) {
-      result.adapterPath = tokens[i + 1];
-      i += 1;
-    } else if (token === '--reason' && i + 1 < tokens.length) {
-      result.reason = tokens[i + 1];
-      i += 1;
-    } else if (token === '--feedback' && i + 1 < tokens.length) {
-      result.feedback = tokens[i + 1];
-      i += 1;
-    } else if (token === '--repo-root' && i + 1 < tokens.length) {
-      result.repoRoot = tokens[i + 1];
-      i += 1;
+    const field = VALUE_FLAGS[tokens[i]];
+    if (field && i + 1 < tokens.length) {
+      result[field] = tokens[++i];
     }
   }
 
   return result;
 }
 
-// ---------------------------------------------------------------------------
-// formatReviewBundle — render a review bundle as human-readable text
-// ---------------------------------------------------------------------------
-
-/**
- * Format a review bundle object into a human-readable string for the CLI.
- *
- * @param {{ featureId: string, status: string, proposal: object,
- *           delta: object|null, acceptance: string[] }} bundle
- * @returns {string}
- */
 function formatReviewBundle(bundle) {
   if (bundle == null || typeof bundle !== 'object') {
     throw new AdapterError(
@@ -106,23 +97,15 @@ function formatReviewBundle(bundle) {
   lines.push(`Status:  ${bundle.status || '(unknown)'}`);
   lines.push('');
 
-  // File list from proposal operations
-  const ops = (bundle.proposal && bundle.proposal.operations) || [];
-  const testOps = (bundle.proposal && bundle.proposal.testOperations) || [];
-  const allOps = [...ops, ...testOps];
-
-  if (allOps.length > 0) {
-    lines.push('Files:');
-    for (const op of allOps) {
-      if (op.path) {
-        lines.push(`  ${op.op || 'unknown'}: ${op.path}`);
-      }
-    }
-    lines.push('');
-  } else {
-    lines.push('Files: (none)');
-    lines.push('');
+  const allOps = [
+    ...((bundle.proposal && bundle.proposal.operations) || []),
+    ...((bundle.proposal && bundle.proposal.testOperations) || []),
+  ];
+  lines.push(allOps.length > 0 ? 'Files:' : 'Files: (none)');
+  for (const op of allOps) {
+    if (op.path) lines.push(`  ${op.op || 'unknown'}: ${op.path}`);
   }
+  lines.push('');
 
   // Delta summary
   if (bundle.delta) {
@@ -148,16 +131,6 @@ function formatReviewBundle(bundle) {
   return lines.join('\n');
 }
 
-// ---------------------------------------------------------------------------
-// runBuildCommand — dispatch a parsed command to the appropriate handler
-// ---------------------------------------------------------------------------
-
-/**
- * Execute a build command object (as returned by parseBuildCommand).
- *
- * @param {object} cmd - Parsed command from parseBuildCommand
- * @returns {Promise<object>} Result object (shape depends on subcommand)
- */
 async function runBuildCommand(cmd) {
   if (cmd == null || typeof cmd !== 'object') {
     throw new AdapterError(
@@ -171,33 +144,12 @@ async function runBuildCommand(cmd) {
     return { error: 'No command specified' };
   }
 
-  switch (cmd.command) {
-    case 'build':
-      return handleBuild(cmd);
-
-    case 'review':
-      return handleReview(cmd);
-
-    case 'approve':
-      return handleApprove(cmd);
-
-    case 'reject':
-      return handleReject(cmd);
-
-    case 'revise':
-      return handleRevise(cmd);
-
-    case 'list':
-      return handleList(cmd);
-
-    default:
-      return { error: `Unknown command: ${cmd.command}. Available: build, review, approve, reject, revise, list` };
+  const handler = BUILD_HANDLERS[cmd.command];
+  if (!handler) {
+    return { error: `Unknown command: ${cmd.command}. Available: run/build, review, promote/approve, reject, revise, list` };
   }
+  return handler(cmd);
 }
-
-// ---------------------------------------------------------------------------
-// Subcommand handlers
-// ---------------------------------------------------------------------------
 
 async function handleBuild(cmd) {
   const featurePath = cmd.featurePath;
@@ -205,8 +157,7 @@ async function handleBuild(cmd) {
     return { error: 'Feature path is required for build command' };
   }
 
-  // Resolve the feature path to check existence
-  const repoRoot = cmd.repoRoot || process.cwd();
+  const repoRoot = repoRootFor(cmd);
   const resolvedPath = path.resolve(repoRoot, featurePath);
 
   if (!fs.existsSync(resolvedPath)) {
@@ -234,10 +185,8 @@ async function handleReview(cmd) {
 
   try {
     const { reviewFeature } = require('./feature_checkpoint.cjs');
-    const repoRoot = cmd.repoRoot || process.cwd();
-    const reportsDir = path.join(repoRoot, 'reports', 'features');
     return reviewFeature(cmd.featureId, {
-      reportsDir,
+      reportsDir: reportsDirFor(cmd),
     });
   } catch (err) {
     return { error: err.message || String(err) };
@@ -251,10 +200,9 @@ async function handleApprove(cmd) {
 
   try {
     const { approveFeature } = require('./feature_checkpoint.cjs');
-    const repoRoot = cmd.repoRoot || process.cwd();
-    const reportsDir = path.join(repoRoot, 'reports', 'features');
+    const repoRoot = repoRootFor(cmd);
     const approveResult = approveFeature(cmd.featureId, {
-      reportsDir,
+      reportsDir: reportsDirFor(cmd),
       repoRoot,
       adapterPath: cmd.adapterPath,
     });
@@ -285,10 +233,8 @@ async function handleReject(cmd) {
 
   try {
     const { rejectFeature } = require('./feature_checkpoint.cjs');
-    const repoRoot = cmd.repoRoot || process.cwd();
-    const reportsDir = path.join(repoRoot, 'reports', 'features');
     return rejectFeature(cmd.featureId, cmd.reason, {
-      reportsDir,
+      reportsDir: reportsDirFor(cmd),
     });
   } catch (err) {
     return { error: err.message || String(err) };
@@ -302,10 +248,8 @@ async function handleRevise(cmd) {
 
   try {
     const { reviseFeature } = require('./feature_checkpoint.cjs');
-    const repoRoot = cmd.repoRoot || process.cwd();
-    const reportsDir = path.join(repoRoot, 'reports', 'features');
     return reviseFeature(cmd.featureId, cmd.feedback, {
-      reportsDir,
+      reportsDir: reportsDirFor(cmd),
     });
   } catch (err) {
     return { error: err.message || String(err) };
@@ -315,18 +259,21 @@ async function handleRevise(cmd) {
 async function handleList(cmd) {
   try {
     const { listPendingFeatures } = require('./feature_checkpoint.cjs');
-    const repoRoot = cmd.repoRoot || process.cwd();
-    const reportsDir = path.join(repoRoot, 'reports', 'features');
-    const features = listPendingFeatures(reportsDir);
+    const features = listPendingFeatures(reportsDirFor(cmd));
     return { features, count: features.length };
   } catch (err) {
     return { error: err.message || String(err) };
   }
 }
 
-// ---------------------------------------------------------------------------
-// Exports
-// ---------------------------------------------------------------------------
+const BUILD_HANDLERS = {
+  build: handleBuild,
+  review: handleReview,
+  approve: handleApprove,
+  reject: handleReject,
+  revise: handleRevise,
+  list: handleList,
+};
 
 module.exports = {
   parseBuildCommand,

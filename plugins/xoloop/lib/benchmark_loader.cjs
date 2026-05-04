@@ -3,10 +3,34 @@
 const { readYamlFile } = require('./overnight_yaml.cjs');
 const { AdapterError } = require('./errors.cjs');
 
+function caseIdOf(benchmarkCase) {
+  return typeof benchmarkCase.id === 'string' && benchmarkCase.id.trim()
+    ? benchmarkCase.id.trim()
+    : String(benchmarkCase.name || '').trim();
+}
+
+function hasEntryPoint(benchmarkCase) {
+  return typeof benchmarkCase.entry_point === 'string'
+    || Boolean(benchmarkCase.entry_point && typeof benchmarkCase.entry_point.command === 'string');
+}
+
+function normalizeBenchmarkCase(benchmarkCase, index) {
+  const id = caseIdOf(benchmarkCase) || `case-${index + 1}`;
+  return {
+    ...benchmarkCase,
+    id,
+    name: benchmarkCase.name || id,
+    bounds: benchmarkCase.bounds || {},
+    entry_point: typeof benchmarkCase.entry_point === 'string'
+      ? { command: benchmarkCase.entry_point }
+      : benchmarkCase.entry_point,
+  };
+}
+
 /**
- * Validate the shape of a benchmark YAML document.
- * Must have: benchmark (string), cases (non-empty array).
- * Each case must have: id, input, expected_output, bounds.
+ * Validate the shape of a benchmark YAML/JSON document.
+ * Supports both current exact-output cases and legacy SHA-256-locked cases
+ * emitted by `xoloop-benchmark create`.
  *
  * @param {object} doc - The parsed YAML document.
  * @throws {AdapterError} with code BENCHMARK_SCHEMA_INVALID on any violation.
@@ -49,36 +73,37 @@ function validateBenchmarkSchema(doc) {
         { fixHint: `Fix cases[${i}] to be a valid object with id, input, expected_output, and bounds.` },
       );
     }
-    if (typeof c.id !== 'string' || c.id.trim().length === 0) {
+    const id = caseIdOf(c);
+    if (!id) {
       throw new AdapterError(
         'BENCHMARK_SCHEMA_INVALID',
         `cases[${i}].id`,
-        `case at index ${i} must have a non-empty string id`,
-        { fixHint: `Ensure cases[${i}].id is a non-empty, non-whitespace string.` },
+        `case at index ${i} must have a non-empty string id or name`,
+        { fixHint: `Ensure cases[${i}].id or cases[${i}].name is a non-empty string.` },
       );
     }
-    if (c.input == null) {
+    if (!hasEntryPoint(c)) {
       throw new AdapterError(
         'BENCHMARK_SCHEMA_INVALID',
-        `cases[${i}].input`,
-        `case "${c.id}" must have an input field`,
-        { fixHint: `Add an "input" field to case "${c.id}".` },
+        `cases[${i}].entry_point`,
+        `case "${id}" must have an entry_point command`,
+        { fixHint: `Add entry_point: "node ..." or entry_point.command to case "${id}".` },
       );
     }
-    if (c.expected_output == null) {
+    if (c.expected_output == null && typeof c.expected_output_sha256 !== 'string') {
       throw new AdapterError(
         'BENCHMARK_SCHEMA_INVALID',
         `cases[${i}].expected_output`,
-        `case "${c.id}" must have an expected_output field`,
-        { fixHint: `Add an "expected_output" field to case "${c.id}".` },
+        `case "${id}" must have expected_output or expected_output_sha256`,
+        { fixHint: `Add expected_output for JSON matching, or expected_output_sha256 for locked stdout matching to case "${id}".` },
       );
     }
-    if (c.bounds == null) {
+    if (c.bounds != null && (typeof c.bounds !== 'object' || Array.isArray(c.bounds))) {
       throw new AdapterError(
         'BENCHMARK_SCHEMA_INVALID',
         `cases[${i}].bounds`,
-        `case "${c.id}" must have a bounds field`,
-        { fixHint: `Add a "bounds" field to case "${c.id}".` },
+        `case "${id}" bounds must be an object when present`,
+        { fixHint: `Set bounds to an object, or omit bounds for case "${id}".` },
       );
     }
   }
@@ -110,11 +135,12 @@ function loadBenchmark(benchmarkPath) {
     version: document.version ?? 1,
     created: document.created ?? null,
     immutable: document.immutable ?? true,
-    cases: document.cases,
+    cases: document.cases.map(normalizeBenchmarkCase),
   };
 }
 
 module.exports = {
+  normalizeBenchmarkCase,
   loadBenchmark,
   validateBenchmarkSchema,
 };

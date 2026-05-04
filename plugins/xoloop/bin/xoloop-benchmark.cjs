@@ -1,10 +1,4 @@
 #!/usr/bin/env node
-/**
- * xoloop-benchmark.cjs — thin CLI wrapper for SHA-256-locked benchmarks.
- *
- * Subcommands: run | create
- */
-
 'use strict';
 
 const path = require('node:path');
@@ -84,23 +78,23 @@ async function runCommand(argv) {
   if (hasFlag(argv, '--script')) {
     return runScriptCommand(argv);
   }
-  const benchmarkPath = parseFlag(argv, '--benchmark', null);
+  const benchmarkPath = parseFlag(argv, '--benchmark', null)
+    || argv.find((arg) => typeof arg === 'string' && !arg.startsWith('--'));
   if (!benchmarkPath) {
     console.error('[xoloop-benchmark] run requires either --script <bash> (simpler pi-style contract) or --benchmark <yaml> (SHA-256-locked).');
     process.exit(1);
   }
   const suite = loadBenchmark(path.resolve(benchmarkPath));
-  const results = [];
-  for (const benchmarkCase of suite.cases) {
-    const r = runBenchmarkCase(benchmarkCase, { cwd: process.cwd() });
-    results.push({ name: benchmarkCase.name || benchmarkCase.id, ...r });
-  }
+  const results = suite.cases.map((benchmarkCase) => ({
+    name: benchmarkCase.name || benchmarkCase.id,
+    ...runBenchmarkCase(benchmarkCase, { cwd: process.cwd() }),
+  }));
   console.log('\n=== Benchmark Summary ===');
   for (const r of results) {
     console.log(`${r.name || r.id}: ${r.verdict}  (hash ${r.outputMatch && r.outputMatch.actualSha256 ? r.outputMatch.actualSha256.slice(0, 12) : 'n/a'})`);
   }
-  const failed = results.filter((r) => String(r.verdict || '').toLowerCase() !== 'pass').length;
-  process.exit(failed > 0 ? 1 : 0);
+  const failed = results.some((r) => String(r.verdict || '').toLowerCase() !== 'pass');
+  process.exit(failed ? 1 : 0);
 }
 
 async function createCommand(argv) {
@@ -118,15 +112,19 @@ async function createCommand(argv) {
     process.exit(1);
   }
   const hash = crypto.createHash('sha256').update(result.stdout).digest('hex');
-  const yaml = [
-    `benchmark: ${path.basename(output, path.extname(output))}`,
-    `cases:`,
-    `  - name: ${name}`,
-    `    entry_point: ${JSON.stringify(entryPoint)}`,
-    `    expected_output_sha256: "${hash}"`,
-    ``,
-  ].join('\n');
-  fs.writeFileSync(output, yaml);
+  const document = {
+    benchmark: path.basename(output, path.extname(output)),
+    cases: [
+      {
+        id: name,
+        name,
+        entry_point: entryPoint,
+        expected_output_sha256: hash,
+        bounds: {},
+      },
+    ],
+  };
+  fs.writeFileSync(output, `${JSON.stringify(document, null, 2)}\n`, 'utf8');
   console.log(`[xoloop-benchmark] Wrote ${output} with hash ${hash.slice(0, 12)}...`);
   process.exit(0);
 }

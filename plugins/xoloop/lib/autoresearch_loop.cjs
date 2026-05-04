@@ -5,8 +5,8 @@ const { spawnSync } = require('node:child_process');
 let normalizeSimulationLock;
 try {
   ({ normalizeSimulationLock } = require('../../benchmarks/lib/simulation_world.cjs'));
-} catch (_) {
-  normalizeSimulationLock = (value) => value;
+} catch (_err) {
+  normalizeSimulationLock = (payload) => ({ schemaVersion: 'xoloop.synthetic-simulation-lock.v0', ...payload });
 }
 const { applyChangeSet, rollbackAppliedChangeSet } = require('./change_set_engine.cjs');
 const { DEFAULT_MINIMAX_API_KEY_ENV } = require('./minimax_client.cjs');
@@ -62,11 +62,55 @@ function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
+function syntheticTargetConfig(resolvedPath, rootDir, options = {}) {
+  const target = normalizeText(options.target)
+    ? path.relative(rootDir, path.resolve(rootDir, options.target)).replace(/\\/g, '/')
+    : null;
+  return {
+    schemaVersion: RESEARCH_SCHEMA_VERSION,
+    sourcePath: resolvedPath,
+    rootDir,
+    suite: 'target-only',
+    defaultFamilyPath: 'synthetic://target-only',
+    reportDir: '.xoloop/autoresearch',
+    holdoutPolicy: { enabled: false },
+    calibrationPolicy: { enabled: false },
+    model: {
+      provider: 'none',
+      apiKeyEnv: DEFAULT_MINIMAX_API_KEY_ENV,
+      baseUrl: undefined,
+      model: 'none',
+      reasoningSplit: false,
+      timeoutMs: 120000,
+      maxAttempts: 1,
+      retryDelayMs: 0,
+    },
+    researchLoop: {
+      goal: DEFAULT_GOAL,
+      mode: normalizeText(options.mode) || 'baseline',
+      maxIterations: Math.max(1, Math.round(normalizeNumber(options.maxIterations, 1))),
+      allowDirtyTree: options.allowDirty === true,
+      focusFiles: target ? [target] : [],
+      quickValidation: [],
+      fullValidation: [],
+      maxSlowdownRatio: 1.02,
+    },
+  };
+}
+
 function loadResearchConfig(configPath, options = {}) {
   const resolvedPath = path.resolve(options.cwd || process.cwd(), configPath || 'proving-ground/config/proving-ground.example.json');
-  const raw = readJson(resolvedPath);
-  const document = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
   const rootDir = path.resolve(options.cwd || process.cwd());
+  let raw;
+  try {
+    raw = readJson(resolvedPath);
+  } catch (err) {
+    if (err && err.code === 'ENOENT' && options.target) {
+      return syntheticTargetConfig(resolvedPath, rootDir, options);
+    }
+    throw err;
+  }
+  const document = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
   const researchLoop = document.researchLoop && typeof document.researchLoop === 'object' ? document.researchLoop : {};
   const model = document.model && typeof document.model === 'object' ? document.model : {};
   return {
@@ -98,6 +142,38 @@ function loadResearchConfig(configPath, options = {}) {
       fullValidation: normalizeStringList(researchLoop.fullValidation, DEFAULT_FULL_VALIDATION),
       maxSlowdownRatio: Math.max(1, normalizeNumber(researchLoop.maxSlowdownRatio, 1.02)),
     },
+  };
+}
+
+function buildSyntheticScenarioFamily(targetPath) {
+  const relTarget = String(targetPath || 'target').replace(/\\/g, '/');
+  return {
+    familyId: 'target-only',
+    title: `Target-only research for ${relTarget}`,
+    description: 'Synthetic one-case family used when no proving-ground scenario family is configured.',
+    worldLock: {
+      schemaVersion: '1.0.0',
+      worldId: 'target-only',
+      simulator: 'none',
+      feeModel: 'none',
+      latencyModel: 'none',
+      marketModel: 'none',
+      riskPolicy: 'none',
+    },
+    generator: { seed: 1 },
+    caseCount: 1,
+    cases: [
+      {
+        id: 'target-only',
+        title: `Inspect ${relTarget}`,
+        sequence: 1,
+        seed: 1,
+        initialState: {},
+        events: [{ type: 'target-analysis', atMs: 0 }],
+        expectations: {},
+      },
+    ],
+    sourcePath: 'synthetic://target-only',
   };
 }
 
@@ -892,6 +968,7 @@ async function runAutoresearchLoop(options = {}) {
     mode: options.mode,
     maxIterations: options.maxIterations,
     allowDirty: options.allowDirty,
+    target: options.target,
   });
   const dirtyTree = getWorkingTreeState(cwd);
   if (config.researchLoop.mode === 'workspace' && dirtyTree.isDirty && !config.researchLoop.allowDirtyTree) {
@@ -904,7 +981,15 @@ async function runAutoresearchLoop(options = {}) {
   }
 
   const familyPath = path.resolve(cwd, options.familyPath || config.defaultFamilyPath);
-  const family = loadScenarioFamily(familyPath);
+  let family;
+  try {
+    family = config.defaultFamilyPath === 'synthetic://target-only'
+      ? buildSyntheticScenarioFamily(options.target)
+      : loadScenarioFamily(familyPath);
+  } catch (err) {
+    if (!options.target) throw err;
+    family = buildSyntheticScenarioFamily(options.target);
+  }
   const simulationSummary = summarizeScenarioFamily(family);
   const baseline = {
     quick: runValidationPlan(config.researchLoop.quickValidation, cwd),

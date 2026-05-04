@@ -3,23 +3,13 @@
 const path = require('node:path');
 const { makeProposalLoader } = require('./live_agent_provider.cjs');
 
-// ---------------------------------------------------------------------------
-// parsePolishOptions
-// ---------------------------------------------------------------------------
+const VALUE_FLAGS = {
+  '--adapter': 'adapterPath',
+  '--objective': 'objectivePath',
+  '--repo-root': 'repoRoot',
+  '--surface': 'surface',
+};
 
-/**
- * Parse CLI-style argv into a structured options object.
- *
- * @param {string[]} argv
- * @returns {{
- *   rounds: number,
- *   untilSaturated: boolean,
- *   dryRun: boolean,
- *   adapterPath: string,
- *   objectivePath: string,
- *   repoRoot: string | undefined,
- * }}
- */
 function parsePolishOptions(argv) {
   const args = Array.isArray(argv) ? argv : [];
   const opts = {
@@ -31,7 +21,7 @@ function parsePolishOptions(argv) {
     repoRoot: undefined,
   };
 
-  for (let i = 0; i < args.length; i++) {
+  for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === '--rounds' && i + 1 < args.length) {
       const parsed = parseInt(args[++i], 10);
@@ -40,118 +30,87 @@ function parsePolishOptions(argv) {
       opts.untilSaturated = true;
     } else if (arg === '--dry-run') {
       opts.dryRun = true;
-    } else if (arg === '--adapter' && i + 1 < args.length) {
-      opts.adapterPath = args[++i];
-    } else if (arg === '--objective' && i + 1 < args.length) {
-      opts.objectivePath = args[++i];
-    } else if (arg === '--repo-root' && i + 1 < args.length) {
-      opts.repoRoot = args[++i];
+    } else if (VALUE_FLAGS[arg] && i + 1 < args.length) {
+      opts[VALUE_FLAGS[arg]] = args[++i];
     }
   }
 
   return opts;
 }
 
-// ---------------------------------------------------------------------------
-// buildPolishSummary
-// ---------------------------------------------------------------------------
+const numberOrZero = (value) => Number(value) || 0;
 
-/**
- * Build an aggregate summary from an array of per-round result objects.
- *
- * @param {Array<{ landed: number, failed: number, testsAdded: number, saturated: boolean }>} roundResults
- * @returns {{
- *   rounds: number,
- *   landed: number,
- *   failed: number,
- *   testsAdded: number,
- *   saturated: boolean,
- *   recommendation: string,
- * }}
- */
-function buildPolishSummary(roundResults) {
-  const results = Array.isArray(roundResults) ? roundResults : [];
-
-  const rounds = results.length;
-  let landed = 0;
-  let failed = 0;
-  let testsAdded = 0;
-  let saturated = false;
-
-  for (const r of results) {
-    if (r == null) continue;
-    landed += Number(r.landed) || 0;
-    failed += Number(r.failed) || 0;
-    testsAdded += Number(r.testsAdded) || 0;
-  }
-
-  // Saturation is true when the last round signals saturated
-  const lastRound = results.length > 0 ? results[results.length - 1] : null;
-  if (lastRound != null && lastRound.saturated) {
-    saturated = true;
-  }
-
-  let recommendation;
-  if (rounds === 0) {
-    recommendation = 'No rounds were executed.';
-  } else if (saturated) {
-    recommendation = 'Diminishing returns detected. Consider switching to BUILD mode or stopping.';
-  } else if (landed === 0) {
-    recommendation = 'No proposals landed. Review the objective or adapter configuration.';
-  } else {
-    recommendation = `${landed} proposal(s) landed across ${rounds} round(s). Continue polishing or switch to BUILD mode.`;
-  }
-
+function emptyPolishSummary(recommendation, error) {
   return {
-    rounds,
-    landed,
-    failed,
-    testsAdded,
-    saturated,
+    rounds: 0,
+    landed: 0,
+    failed: 0,
+    testsAdded: 0,
+    saturated: false,
     recommendation,
+    ...(error ? { error } : {}),
   };
 }
 
-// ---------------------------------------------------------------------------
-// runPolishLoop
-// ---------------------------------------------------------------------------
+function buildRecommendation(rounds, saturated, landed) {
+  if (rounds === 0) return 'No rounds were executed.';
+  if (saturated) return 'Diminishing returns detected. Consider switching to BUILD mode or stopping.';
+  if (landed === 0) return 'No proposals landed. Review the objective or adapter configuration.';
+  return `${landed} proposal(s) landed across ${rounds} round(s). Continue polishing or switch to BUILD mode.`;
+}
 
-/**
- * Run the polish loop: load adapter + objective, execute rounds, collect
- * results, and return a summary.
- *
- * The loop never throws -- it catches errors and returns a summary with an
- * error indication.
- *
- * @param {{
- *   rounds: number,
- *   untilSaturated: boolean,
- *   dryRun: boolean,
- *   adapterPath: string,
- *   objectivePath: string,
- *   repoRoot?: string,
- * }} options
- * @returns {Promise<{
- *   rounds: number,
- *   landed: number,
- *   failed: number,
- *   testsAdded: number,
- *   saturated: boolean,
- *   recommendation: string,
- *   error?: string,
- * }>}
- */
+function buildPolishSummary(roundResults) {
+  const results = Array.isArray(roundResults) ? roundResults : [];
+  const totals = results.reduce((acc, result) => {
+    if (!result) return acc;
+    acc.landed += numberOrZero(result.landed);
+    acc.failed += numberOrZero(result.failed);
+    acc.testsAdded += numberOrZero(result.testsAdded);
+    return acc;
+  }, { landed: 0, failed: 0, testsAdded: 0 });
+  const rounds = results.length;
+  const lastRound = rounds > 0 ? results[rounds - 1] : null;
+  const saturated = Boolean(lastRound && lastRound.saturated);
+
+  return {
+    rounds,
+    ...totals,
+    saturated,
+    recommendation: buildRecommendation(rounds, saturated, totals.landed),
+  };
+}
+
+function normalizeBatchResult(batchResult) {
+  return {
+    landed: numberOrZero(batchResult && batchResult.landed),
+    failed: numberOrZero(batchResult && batchResult.failed),
+    testsAdded: numberOrZero(batchResult && batchResult.testsAdded),
+    saturated: false,
+  };
+}
+
+function detectSaturation(roundResults, currentRound) {
+  const { detectDiminishingReturns } = require('./diminishing_returns.cjs');
+  const roundHistory = roundResults.map((result, index) => ({
+    roundNumber: index + 1,
+    landed: result.landed,
+    attempted: result.landed + result.failed,
+  }));
+  roundHistory.push({
+    roundNumber: roundResults.length + 1,
+    landed: currentRound.landed,
+    attempted: currentRound.landed + currentRound.failed,
+  });
+  return Boolean(detectDiminishingReturns(roundHistory, []).saturated);
+}
+
 async function runPolishLoop(options) {
   if (options != null && (typeof options !== 'object' || Array.isArray(options))) {
-    return {
-      rounds: 0,
-      landed: 0,
-      failed: 0,
-      testsAdded: 0,
-      saturated: false,
-      recommendation: 'options must be an object or nullish.',
-      error: 'INVALID_OPTIONS: expected object, got ' + (Array.isArray(options) ? 'array' : typeof options),
-    };
+    const received = Array.isArray(options) ? 'array' : typeof options;
+    return emptyPolishSummary(
+      'options must be an object or nullish.',
+      `INVALID_OPTIONS: expected object, got ${received}`,
+    );
   }
 
   const {
@@ -164,116 +123,53 @@ async function runPolishLoop(options) {
     proposalLoader,
     liveAgentProvider,
   } = options || {};
-
   const repoRoot = path.resolve(rawRepoRoot || process.cwd());
   const effectiveProposalLoader = proposalLoader || makeProposalLoader(liveAgentProvider, 'polish');
 
-  // -----------------------------------------------------------------------
-  // Step 1: Load adapter and objective
-  // -----------------------------------------------------------------------
   let adapter;
 
   try {
-    const { loadOvernightAdapter } = require('./overnight_adapter.cjs');
-    adapter = loadOvernightAdapter(adapterPath, { repoRoot });
+    adapter = require('./overnight_adapter.cjs').loadOvernightAdapter(adapterPath, { repoRoot });
   } catch (err) {
-    return {
-      rounds: 0,
-      landed: 0,
-      failed: 0,
-      testsAdded: 0,
-      saturated: false,
-      recommendation: `Failed to load adapter: ${err.message}`,
-      error: `adapter_load_error: ${err.message}`,
-    };
+    return emptyPolishSummary(`Failed to load adapter: ${err.message}`, `adapter_load_error: ${err.message}`);
   }
 
   try {
-    const { loadOvernightObjective } = require('./overnight_objective.cjs');
-    loadOvernightObjective(objectivePath, adapter, { repoRoot });
+    require('./overnight_objective.cjs').loadOvernightObjective(objectivePath, adapter, { repoRoot });
   } catch (err) {
-    return {
-      rounds: 0,
-      landed: 0,
-      failed: 0,
-      testsAdded: 0,
-      saturated: false,
-      recommendation: `Failed to load objective: ${err.message}`,
-      error: `objective_load_error: ${err.message}`,
-    };
+    return emptyPolishSummary(`Failed to load objective: ${err.message}`, `objective_load_error: ${err.message}`);
   }
 
-  // -----------------------------------------------------------------------
-  // Step 2: Run rounds
-  // -----------------------------------------------------------------------
   const roundResults = [];
-
-  for (let roundNum = 0; roundNum < maxRounds; roundNum++) {
-    // In dry-run mode, simulate a single round with zero results and stop.
+  for (let roundNum = 0; roundNum < maxRounds; roundNum += 1) {
     if (dryRun) {
-      roundResults.push({
-        landed: 0,
-        failed: 0,
-        testsAdded: 0,
-        saturated: false,
-      });
-      break;
+      return buildPolishSummary([{ landed: 0, failed: 0, testsAdded: 0, saturated: false }]);
     }
 
-    // Attempt a real batch round.
-    let batchResult;
+    let round;
     try {
       const { runOvernightBatch } = require('./overnight_engine.cjs');
-      batchResult = await runOvernightBatch({
+      round = normalizeBatchResult(await runOvernightBatch({
         cwd: repoRoot,
         adapterPath,
         objectivePath,
         allowDirty: true,
         proposalLoader: effectiveProposalLoader,
-      });
-    } catch (err) {
-      // Record the failed round and continue
-      roundResults.push({
-        landed: 0,
-        failed: 1,
-        testsAdded: 0,
-        saturated: false,
-      });
-      continue;
+      }));
+    } catch (_err) {
+      round = { landed: 0, failed: 1, testsAdded: 0, saturated: false };
     }
 
-    const landed = Number(batchResult && batchResult.landed) || 0;
-    const failed = Number(batchResult && batchResult.failed) || 0;
-    const testsAdded = Number(batchResult && batchResult.testsAdded) || 0;
-
-    // Check diminishing returns
-    let saturated = false;
     if (untilSaturated) {
       try {
-        const { detectDiminishingReturns } = require('./diminishing_returns.cjs');
-        const roundHistory = roundResults.map((r, idx) => ({
-          roundNumber: idx + 1,
-          landed: r.landed,
-          attempted: r.landed + r.failed,
-        }));
-        // Add the current round
-        roundHistory.push({
-          roundNumber: roundResults.length + 1,
-          landed,
-          attempted: landed + failed,
-        });
-        const detection = detectDiminishingReturns(roundHistory, []);
-        saturated = detection.saturated;
+        round.saturated = detectSaturation(roundResults, round);
       } catch (_) {
-        // If detection fails, continue without saturation signal
+        round.saturated = false;
       }
     }
 
-    roundResults.push({ landed, failed, testsAdded, saturated });
-
-    if (saturated) {
-      break;
-    }
+    roundResults.push(round);
+    if (round.saturated) break;
   }
 
   return buildPolishSummary(roundResults);

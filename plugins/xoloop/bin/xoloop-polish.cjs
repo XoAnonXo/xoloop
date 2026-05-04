@@ -1,13 +1,4 @@
 #!/usr/bin/env node
-/**
- * xoloop-polish.cjs — thin CLI wrapper around polish_runner.
- *
- * Enforces:
- *   - Bootstrap on first use (ensureConfig)
- *   - Dirty-overlap gate (locked D.1)
- *   - Dry-run default on first invocation per repo (locked D.7)
- */
-
 'use strict';
 
 const {

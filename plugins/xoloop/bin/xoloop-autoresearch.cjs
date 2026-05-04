@@ -1,8 +1,4 @@
 #!/usr/bin/env node
-/**
- * xoloop-autoresearch.cjs — thin CLI wrapper for Champion vs Challenger tournament.
- */
-
 'use strict';
 
 const path = require('node:path');
@@ -20,12 +16,17 @@ async function main() {
   const argv = process.argv.slice(2);
   if (hasFlag(argv, '--help') || hasFlag(argv, '-h')) {
     console.log('Usage: xoloop-autoresearch --target <path> [--rounds 5] [--token-cap utility|normal|strategic|override]');
+    console.log('       [--config <path>] [--family <path>] [--mode baseline|proposal|workspace] [--skip-model]');
     process.exit(0);
   }
   const cwd = process.cwd();
   const target = parseFlag(argv, '--target', null);
   const rounds = Number(parseFlag(argv, '--rounds', 5));
   const tokenCap = parseFlag(argv, '--token-cap', 'normal');
+  const configPath = parseFlag(argv, '--config', null);
+  const familyPath = parseFlag(argv, '--family', null);
+  const mode = parseFlag(argv, '--mode', null);
+  const skipModel = hasFlag(argv, '--skip-model');
   const allowDirty = hasFlag(argv, '--allow-dirty');
 
   if (!target) {
@@ -38,16 +39,25 @@ async function main() {
 
   const result = await runAutoresearchLoop({
     target: path.resolve(target),
-    maxRounds: rounds,
-    tokenBudgetTier: tokenCap,
+    configPath,
+    familyPath,
+    maxIterations: Number.isFinite(rounds) && rounds > 0 ? rounds : 5,
+    mode: mode || (skipModel ? 'baseline' : undefined),
+    skipModel,
+    risk: tokenCap === 'strategic' ? 'guarded' : 'safe',
+    overrideBudget: tokenCap === 'override',
     cwd,
   });
+  const iterations = Array.isArray(result.iterations) ? result.iterations : [];
+  const kept = iterations.filter((iteration) => iteration && iteration.decision && iteration.decision.keep).length;
+  const winner = kept > 0 ? 'challenger' : 'champion';
+  const converged = result.stopReason ? result.stopReason.reason : (iterations.length === 0 ? 'baseline-only' : 'round-limit');
 
   console.log('\n=== Autoresearch Summary ===');
-  console.log(`Rounds:        ${result.rounds}`);
-  console.log(`Winner:        ${result.winner}`);
-  console.log(`Converged:     ${result.converged}`);
-  console.log(`Evidence path: ${result.evidencePath || 'n/a'}`);
+  console.log(`Rounds:        ${iterations.length}`);
+  console.log(`Winner:        ${winner}`);
+  console.log(`Converged:     ${converged}`);
+  console.log(`Evidence path: ${result.artifacts && result.artifacts.reportPath ? result.artifacts.reportPath : 'n/a'}`);
   if (result.sensitiveDomainGate) {
     console.log(`\n[human approval required] domain=${result.sensitiveDomainGate.domain}`);
   }

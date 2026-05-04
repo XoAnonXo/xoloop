@@ -37,10 +37,9 @@ const DEFAULT_SEVERITY_FLOOR = 'P2';
 
 function severityRank(severity) {
   const key = String(severity || 'info').trim();
-  if (Object.prototype.hasOwnProperty.call(SEVERITY_RANK, key)) {
-    return SEVERITY_RANK[key];
-  }
-  return SEVERITY_RANK.info;
+  return Object.prototype.hasOwnProperty.call(SEVERITY_RANK, key)
+    ? SEVERITY_RANK[key]
+    : SEVERITY_RANK.info;
 }
 
 /**
@@ -187,20 +186,9 @@ function canonicalizeRoot(cwd) {
 }
 
 function isInsideRoot(candidateAbsolute, canonicalRoot) {
-  if (typeof canonicalRoot !== 'string' || canonicalRoot.length === 0) {
-    return true;
-  }
+  if (typeof canonicalRoot !== 'string' || canonicalRoot.length === 0) return true;
   const rel = path.relative(canonicalRoot, candidateAbsolute);
-  if (rel === '') {
-    return true;
-  }
-  if (rel.startsWith('..')) {
-    return false;
-  }
-  if (path.isAbsolute(rel)) {
-    return false;
-  }
-  return true;
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
 function buildCanonicalAllowlist(allowedFiles, cwd) {
@@ -280,27 +268,18 @@ function checkChangeSetPathScope(changeSet, allowedFiles, cwd) {
 }
 
 function isBlocking(finding, floor) {
-  const findingRank = severityRank(finding && finding.severity);
-  const floorRank = severityRank(floor);
-  return findingRank <= floorRank;
+  return severityRank(finding && finding.severity) <= severityRank(floor);
 }
 
 function filterBlockingFindings(findings, floor) {
-  if (!Array.isArray(findings)) {
-    return [];
-  }
-  return findings.filter((f) => isBlocking(f, floor));
+  return Array.isArray(findings) ? findings.filter((f) => isBlocking(f, floor)) : [];
 }
 
 function summarizeBySeverity(findings) {
   const counts = { P1: 0, P2: 0, P3: 0, low: 0, info: 0, other: 0 };
   for (const f of (Array.isArray(findings) ? findings : [])) {
     const sev = String(f && f.severity || '').trim();
-    if (Object.prototype.hasOwnProperty.call(counts, sev)) {
-      counts[sev] += 1;
-    } else {
-      counts.other += 1;
-    }
+    counts[Object.prototype.hasOwnProperty.call(counts, sev) ? sev : 'other'] += 1;
   }
   return counts;
 }

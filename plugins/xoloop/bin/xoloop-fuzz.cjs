@@ -1,11 +1,4 @@
 #!/usr/bin/env node
-/**
- * xoloop-fuzz.cjs — thin CLI wrapper for property-based fuzzing.
- *
- * Delegates to fuzz_engine.fuzzModule(modulePath, options) which auto-
- * discovers exports and returns { results: { fnName: { runs, crashes, ... } } }.
- */
-
 'use strict';
 
 const path = require('node:path');
@@ -45,7 +38,7 @@ async function main() {
   let totalCrashes = 0;
   const crashList = [];
   for (const [fnName, r] of Object.entries(result.results || {})) {
-    totalRuns += (r.runs || 0);
+    totalRuns += (r.totalRuns || r.runs || 0);
     const crashes = Array.isArray(r.crashes) ? r.crashes : [];
     totalCrashes += crashes.length;
     for (const c of crashes) crashList.push({ fn: fnName, ...c });

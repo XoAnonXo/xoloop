@@ -1,21 +1,4 @@
 #!/usr/bin/env node
-/**
- * xoloop-audit.cjs — thin CLI wrapper for the audit->fix loop.
- *
- * Injection contract (from audit_runner.cjs):
- *   - callAuditor        : required
- *   - callFixer          : required (proposal-only mode: omit applyChangeSet)
- *   - applyChangeSet     : required for apply mode
- *   - rollbackChangeSet  : required whenever applyChangeSet is wired
- *
- * Return shape (from audit_runner.cjs):
- *   { converged, rounds, history, finalAudit, finalSummary, reason?, fix? }
- *   - finalAudit.findings: array of { severity, file, line, issue, fixHint }
- *   - finalSummary: { P1, P2, P3, low, total } count by severity
- *   - reason: 'no-fix-proposed' | 'proposal-only-mode' | 'max-rounds-exhausted'
- *             | 'validation-failed' | etc.
- */
-
 'use strict';
 
 const path = require('node:path');
@@ -28,19 +11,10 @@ const {
   hasFlag,
 } = require('./_common.cjs');
 
-const { runAuditFixLoop } = requireLib('audit_runner.cjs');
+const { runAuditFixLoop, summarizeBySeverity } = requireLib('audit_runner.cjs');
 const { callAuditorWithCodex } = requireLib('audit_caller_codex.cjs');
 const { callFixerWithOpus } = requireLib('audit_caller_opus.cjs');
 const { applyChangeSet, rollbackAppliedChangeSet } = requireLib('change_set_engine.cjs');
-
-function summarizeBySeverity(findings) {
-  const counts = { P1: 0, P2: 0, P3: 0, low: 0, info: 0 };
-  for (const f of findings || []) {
-    const s = f && f.severity;
-    if (s && Object.prototype.hasOwnProperty.call(counts, s)) counts[s] += 1;
-  }
-  return counts;
-}
 
 function printFindings(findings, maxPerSeverity = 10) {
   if (!Array.isArray(findings) || findings.length === 0) return;
