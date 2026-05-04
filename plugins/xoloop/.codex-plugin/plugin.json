@@ -1,0 +1,46 @@
+{
+  "name": "xoloop",
+  "version": "0.3.0",
+  "description": "XOLoop is a verification and optimisation runtime for code improvement loops: build, simplify, polish, fuzz, benchmark, improve, autoresearch, audit, docs, overnight, finalize, verify, and optimise.",
+  "author": {
+    "name": "XoAnonXo"
+  },
+  "homepage": "https://github.com/XoAnonXo/xoloop",
+  "repository": "https://github.com/XoAnonXo/xoloop",
+  "license": "MIT",
+  "keywords": [
+    "iteration",
+    "verification",
+    "optimization",
+    "optimisation",
+    "tournament",
+    "audit",
+    "fuzz",
+    "tdd",
+    "compound-engineering",
+    "subagent",
+    "session-persistence",
+    "autoresearch"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "XOLoop",
+    "shortDescription": "Run evidence-led code verification, optimisation, and improvement loops",
+    "longDescription": "XOLoop gives Codex reusable workflows for code improvement: TDD build, deletion-focused simplify, polish, property fuzzing, deterministic benchmarks, benchmark-driven improve, audit, docs, overnight orchestration, finalize, and the /verify + /optimise goal runtime. It treats implementations as black-box interfaces and keeps reproducible evidence ledgers for verification and optimization runs.",
+    "developerName": "XoAnonXo",
+    "category": "Coding",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/XoAnonXo/xoloop",
+    "defaultPrompt": [
+      "Use XOLoop to verify this code with a machine-checkable goal contract",
+      "Use XOLoop to optimise this implementation while preserving verified behavior",
+      "Use XOLoop to polish, audit, fuzz, or benchmark this repository"
+    ],
+    "screenshots": [],
+    "brandColor": "#1F6FEB"
+  }
+}

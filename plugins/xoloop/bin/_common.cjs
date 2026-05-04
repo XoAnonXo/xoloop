@@ -4,7 +4,7 @@
  * Shared helpers for all xoloop-* CLI wrappers.
  *
  * All wrappers must:
- *   - resolve the plugin lib/ directory via $CLAUDE_PLUGIN_ROOT or relative fallback
+ *   - resolve the plugin lib/ directory via plugin-root env vars or relative fallback
  *   - detect missing overnight.yaml and delegate to xoloop-init first
  *   - enforce the dirty-overlap gate (locked D.1) for write-capable modes
  *   - per-repo lock for write modes, per-worktree for read modes (locked D.5)
@@ -15,9 +15,11 @@ const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
 
 function pluginRoot() {
-  // Prefer env var set by Claude Code when plugin is activated.
-  if (process.env.CLAUDE_PLUGIN_ROOT && fs.existsSync(process.env.CLAUDE_PLUGIN_ROOT)) {
-    return process.env.CLAUDE_PLUGIN_ROOT;
+  // Prefer explicit plugin root vars set by hosts or local wrappers.
+  for (const name of ['XOLOOP_PLUGIN_ROOT', 'CODEX_PLUGIN_ROOT', 'CLAUDE_PLUGIN_ROOT']) {
+    if (process.env[name] && fs.existsSync(process.env[name])) {
+      return process.env[name];
+    }
   }
   // Fallback: this file lives at <root>/bin/_common.cjs
   return path.resolve(__dirname, '..');
@@ -31,7 +33,7 @@ function requireLib(relative) {
   const resolved = libPath(relative);
   if (!fs.existsSync(resolved)) {
     console.error(`[xoloop] framework not bundled at ${resolved}`);
-    console.error('[xoloop] run: node $CLAUDE_PLUGIN_ROOT/scripts/bundle-framework.cjs');
+    console.error('[xoloop] run: node $XOLOOP_PLUGIN_ROOT/scripts/bundle-framework.cjs');
     process.exit(1);
   }
   return require(resolved);
