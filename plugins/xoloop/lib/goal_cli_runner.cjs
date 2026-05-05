@@ -3,14 +3,40 @@
 const { spawn } = require('node:child_process');
 const { spawnSync } = require('node:child_process');
 
-function sampleChildRssMb(pid) {
+function sampleProcessTreeRssMb(pid) {
   try {
-    const result = spawnSync('ps', ['-o', 'rss=', '-p', String(pid)], {
+    const tree = spawnSync('ps', ['-axo', 'pid=,ppid=,rss='], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     });
-    if (result.status !== 0) return 0;
-    const kb = parseInt(String(result.stdout || '').trim(), 10);
+    if (tree.status !== 0) {
+      const single = spawnSync('ps', ['-o', 'rss=', '-p', String(pid)], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const kb = parseInt(String(single.stdout || '').trim(), 10);
+      return Number.isFinite(kb) && kb > 0 ? kb / 1024 : 0;
+    }
+    const rows = String(tree.stdout || '').split(/\r?\n/)
+      .map((line) => line.trim().split(/\s+/).map((value) => parseInt(value, 10)))
+      .filter((row) => row.length === 3 && row.every(Number.isFinite))
+      .map(([childPid, parentPid, rssKb]) => ({ pid: childPid, ppid: parentPid, rssKb }));
+    const childrenByParent = new Map();
+    for (const row of rows) {
+      if (!childrenByParent.has(row.ppid)) childrenByParent.set(row.ppid, []);
+      childrenByParent.get(row.ppid).push(row.pid);
+    }
+    const wanted = new Set([pid]);
+    const stack = [pid];
+    while (stack.length > 0) {
+      const current = stack.pop();
+      for (const child of childrenByParent.get(current) || []) {
+        if (wanted.has(child)) continue;
+        wanted.add(child);
+        stack.push(child);
+      }
+    }
+    const kb = rows.filter((row) => wanted.has(row.pid)).reduce((sum, row) => sum + Math.max(0, row.rssKb), 0);
     return Number.isFinite(kb) && kb > 0 ? kb / 1024 : 0;
   } catch (_err) {
     return 0;
@@ -29,7 +55,7 @@ function runCliCommand(command, input, options = {}) {
     let timedOut = false;
     let peakMemoryMb = 0;
 
-    const childEnv = { ...process.env };
+    const childEnv = { ...process.env, ...(options.env || {}) };
     delete childEnv.NODE_TEST_CONTEXT;
     delete childEnv.NODE_CHANNEL_FD;
 
@@ -40,7 +66,7 @@ function runCliCommand(command, input, options = {}) {
     });
 
     const sampler = setInterval(() => {
-      peakMemoryMb = Math.max(peakMemoryMb, sampleChildRssMb(child.pid));
+      peakMemoryMb = Math.max(peakMemoryMb, sampleProcessTreeRssMb(child.pid));
     }, 20);
 
     const timeout = setTimeout(() => {
@@ -80,7 +106,7 @@ function runCliCommand(command, input, options = {}) {
     child.on('close', (code, signal) => {
       clearInterval(sampler);
       clearTimeout(timeout);
-      peakMemoryMb = Math.max(peakMemoryMb, sampleChildRssMb(child.pid));
+      peakMemoryMb = Math.max(peakMemoryMb, sampleProcessTreeRssMb(child.pid));
       resolve({
         exitCode: typeof code === 'number' ? code : (timedOut ? 124 : 1),
         signal,

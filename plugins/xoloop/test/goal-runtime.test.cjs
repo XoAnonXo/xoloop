@@ -11,7 +11,7 @@ const {
   createGoal,
   runGoalVerify,
 } = require('../lib/goal_verify_runner.cjs');
-const { loadGoalManifest, writeGoalManifest } = require('../lib/goal_manifest.cjs');
+const { artifactHash, loadGoalManifest, writeGoalManifest } = require('../lib/goal_manifest.cjs');
 const { runOptimiseLoop } = require('../lib/goal_optimise_runner.cjs');
 
 const repoRoot = path.resolve(__dirname, '..', '..', '..');
@@ -238,4 +238,148 @@ test('command-suite goals verify named CLI obligations', async () => {
 
   assert.equal(card.verdict, 'PASS_EVIDENCED');
   assert.deepEqual(card.missing_obligations, []);
+});
+
+test('general-io goals verify black-box CLI cases and properties', async () => {
+  const cwd = tmpDir();
+  fs.writeFileSync(path.join(cwd, 'double.cjs'), [
+    "let input = '';",
+    "process.stdin.on('data', (chunk) => { input += chunk; });",
+    "process.stdin.on('end', () => {",
+    "  const n = Number(input.trim());",
+    "  process.stdout.write(JSON.stringify({ value: n * 2 }) + '\\n');",
+    "});",
+    '',
+  ].join('\n'), 'utf8');
+  fs.mkdirSync(path.join(cwd, '.xoloop', 'goals', 'general-io', 'cases'), { recursive: true });
+  fs.writeFileSync(path.join(cwd, '.xoloop', 'goals', 'general-io', 'cases', 'two.json'), JSON.stringify({
+    id: 'two',
+    input: '2\n',
+    expected_exit_code: 0,
+    expected_stdout: '{"value":4}\n',
+  }, null, 2), 'utf8');
+  const goalPath = path.join(cwd, '.xoloop', 'goals', 'general-io', 'goal.yaml');
+  writeGoalManifest(goalPath, {
+    version: 0.1,
+    goal_id: 'general-io',
+    objective: 'Verify a language-neutral input/output contract.',
+    interface: {
+      type: 'cli',
+      command: 'node double.cjs',
+      stdin: 'text',
+      stdout: 'json',
+    },
+    artifacts: {
+      paths: ['double.cjs'],
+    },
+    verify: {
+      kind: 'general-io',
+      cases: 'cases/*.json',
+      properties: ['deterministic', 'stdout_json', 'no_stderr'],
+    },
+  });
+
+  const { card } = await runGoalVerify(goalPath, { cwd });
+
+  assert.equal(card.verdict, 'PASS_EVIDENCED');
+  assert.deepEqual(card.missing_obligations, []);
+  assert.equal(card.summary.failed, 0);
+});
+
+test('general-io goals produce differential counterexamples', async () => {
+  const cwd = tmpDir();
+  fs.writeFileSync(path.join(cwd, 'impl.cjs'), "process.stdin.resume(); process.stdin.on('end', () => process.stdout.write('bad\\n'));\n", 'utf8');
+  fs.writeFileSync(path.join(cwd, 'ref.cjs'), "process.stdin.resume(); process.stdin.on('end', () => process.stdout.write('good\\n'));\n", 'utf8');
+  fs.mkdirSync(path.join(cwd, '.xoloop', 'goals', 'diff', 'cases'), { recursive: true });
+  fs.writeFileSync(path.join(cwd, '.xoloop', 'goals', 'diff', 'cases', 'one.json'), JSON.stringify({
+    id: 'one',
+    input: 'x',
+  }, null, 2), 'utf8');
+  const goalPath = path.join(cwd, '.xoloop', 'goals', 'diff', 'goal.yaml');
+  writeGoalManifest(goalPath, {
+    version: 0.1,
+    goal_id: 'diff',
+    objective: 'Detect divergence from a reference command.',
+    interface: {
+      type: 'cli',
+      command: 'node impl.cjs',
+    },
+    artifacts: {
+      paths: ['impl.cjs'],
+    },
+    verify: {
+      kind: 'general-io',
+      cases: 'cases/*.json',
+      reference_command: 'node ref.cjs',
+      properties: ['differential_reference'],
+    },
+  });
+
+  const { card } = await runGoalVerify(goalPath, { cwd });
+
+  assert.equal(card.verdict, 'FAIL');
+  assert.equal(card.counterexample.obligation, 'differential_reference');
+  assert.match(card.replay, /--case one/);
+});
+
+test('artifact hash covers verifier-owned inputs that affect verdicts', () => {
+  const cwd = tmpDir();
+  const goalDir = path.join(cwd, '.xoloop', 'goals', 'freshness');
+  fs.mkdirSync(path.join(goalDir, 'cases'), { recursive: true });
+  fs.mkdirSync(path.join(goalDir, 'bench'), { recursive: true });
+  fs.mkdirSync(path.join(goalDir, 'masks'), { recursive: true });
+  fs.mkdirSync(path.join(goalDir, 'baselines', 'desktop'), { recursive: true });
+  fs.mkdirSync(path.join(goalDir, 'schedules'), { recursive: true });
+  fs.writeFileSync(path.join(goalDir, 'cases', 'case.json'), '{"id":"case","expected_stdout":"ok"}\n', 'utf8');
+  fs.writeFileSync(path.join(goalDir, 'bench', 'bench.json'), '{"id":"bench","input":"x"}\n', 'utf8');
+  fs.writeFileSync(path.join(goalDir, 'masks', 'mask.json'), '{"regions":[]}\n', 'utf8');
+  fs.writeFileSync(path.join(goalDir, 'baselines', 'desktop', 'home.png'), 'baseline-v1', 'utf8');
+  fs.writeFileSync(path.join(goalDir, 'schedules', 'race.json'), '{"steps":["a","b"]}\n', 'utf8');
+  fs.writeFileSync(path.join(goalDir, 'accepted-gaps.json'), '[]\n', 'utf8');
+  fs.writeFileSync(path.join(goalDir, 'discovery.json'), '{"blocking_gaps":[]}\n', 'utf8');
+  fs.writeFileSync(path.join(goalDir, 'invariants.json'), '[{"id":"total"}]\n', 'utf8');
+  const goalPath = path.join(goalDir, 'goal.yaml');
+  const goal = {
+    version: 0.1,
+    goal_id: 'freshness',
+    objective: 'Protect verifier-owned evidence inputs.',
+    interface: {
+      type: 'cli',
+      command: 'node noop.cjs',
+      stdin: 'none',
+      stdout: 'json',
+      timeout_ms: 10000,
+    },
+    artifacts: {
+      paths: [],
+    },
+    verify: {
+      kind: 'frontend-suite',
+      cases: 'cases/*.json',
+      benchmark_cases: 'bench/*.json',
+      masks: 'masks/*.json',
+      baselines_dir: 'baselines',
+      schedules_dir: 'schedules',
+      accepted_gap_file: 'accepted-gaps.json',
+      discovery_file: 'discovery.json',
+      invariants_file: 'invariants.json',
+    },
+  };
+  writeGoalManifest(goalPath, goal);
+
+  const assertHashChanges = (relativePath, nextText) => {
+    const before = artifactHash(goal, cwd, goalPath);
+    fs.writeFileSync(path.join(goalDir, relativePath), nextText, 'utf8');
+    const after = artifactHash(goal, cwd, goalPath);
+    assert.notEqual(after, before, `${relativePath} must affect artifact hash`);
+  };
+
+  assertHashChanges('cases/case.json', '{"id":"case","expected_stdout":"changed"}\n');
+  assertHashChanges('bench/bench.json', '{"id":"bench","input":"changed"}\n');
+  assertHashChanges('masks/mask.json', '{"regions":[{"x":1}]}\n');
+  assertHashChanges('baselines/desktop/home.png', 'baseline-v2');
+  assertHashChanges('schedules/race.json', '{"steps":["b","a"]}\n');
+  assertHashChanges('accepted-gaps.json', '["frontend:baseline-missing"]\n');
+  assertHashChanges('discovery.json', '{"blocking_gaps":[{"id":"api:missing"}]}\n');
+  assertHashChanges('invariants.json', '[{"id":"total","rule":"changed"}]\n');
 });

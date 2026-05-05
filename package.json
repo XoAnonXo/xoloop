@@ -5,12 +5,25 @@
   "type": "commonjs",
   "scripts": {
     "test": "node --test tests/*.test.cjs",
+    "test:verify-state": "node --test plugins/xoloop/test/state-suite.test.cjs",
+    "test:verify-state-live": "XOLOOP_RUN_STATE_LIVE_E2E=1 node --test plugins/xoloop/test/state-suite-live.test.cjs",
+    "test:verify-performance": "node --test plugins/xoloop/test/performance-suite.test.cjs",
+    "test:verify-formal": "node --test plugins/xoloop/test/formal-suite.test.cjs",
+    "test:verify-formal-live": "XOLOOP_RUN_FORMAL_LIVE_E2E=1 node --test plugins/xoloop/test/formal-suite-live.test.cjs",
+    "test:verify-suite": "node --test plugins/xoloop/test/suite-orchestration.test.cjs",
+    "test:verify-discovery": "node --test plugins/xoloop/test/discovery-suite.test.cjs",
     "completeness": "node plugins/xoloop/bin/xoloop-completeness.cjs --json"
   },
   "dependencies": {
+    "ajv": "^8.20.0",
     "fast-check": "^4.7.0",
     "tsx": "^4.21.0",
     "yaml": "^2.8.4",
     "zod": "^4.4.2"
+  },
+  "devDependencies": {
+    "pixelmatch": "^7.2.0",
+    "playwright": "^1.59.1",
+    "pngjs": "^7.0.0"
   }
 }
