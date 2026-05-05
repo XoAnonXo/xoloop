@@ -39,6 +39,17 @@ User says any of:
   with surface = docs/
 - "translate docs" — out of scope
 
+## Verify / Discovery use
+
+Docs mode is doc-only, but examples, generated API docs, or source
+docblocks can affect build tooling and user-facing contracts. For broad
+or behavior-sensitive docs refreshes, run
+`xoloop-verify discover --write --json` and select repo-specific suites
+from detected frontend, api, state, function, runtime-lab, performance, formal, cli,
+concurrency, state-machine, and safety surfaces. Finish with relevant
+goals at `PASS_EVIDENCED`; `PASS_WITH_GAPS` requires accepted named gaps
+before claiming coverage.
+
 ## How it runs (step-by-step)
 
 1. **Initialize session.**

@@ -21,6 +21,16 @@ the same file, they're conceptually coupled and stay in one branch.
 - "turn the session into reviewable branches"
 - "clean up the noisy loop output"
 
+## Verify / Discovery use
+
+Finalize preserves evidence from mutating sessions. During dry-run,
+include the latest Verify card for each group and run
+`xoloop-verify discover --write --json` if the session touched risky
+surfaces. Select repo-specific suites from detected frontend, api, state, function, runtime-lab, performance, formal,
+cli, concurrency, state-machine, and safety surfaces. Groups from simplify, improve, autoresearch, audit, or broad
+polish should be review-ready only with `PASS_EVIDENCED`; `PASS_WITH_GAPS`
+requires accepted named gaps in the branch report.
+
 ## How it runs
 
 1. **Check session ledger.** Confirm `.xoloop/session.jsonl` exists with

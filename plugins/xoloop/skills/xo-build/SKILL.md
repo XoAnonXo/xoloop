@@ -22,6 +22,18 @@ between them.
 - "scaffold a utility for..."
 - "write me a ... from scratch"
 
+## Verify / Discovery use
+
+For a new feature that touches an existing observable boundary or any
+safety-sensitive path, run `xoloop-verify discover --write --json`
+during intent capture. Select repo-specific suites from the detected
+frontend, api, state, function, runtime-lab, performance, formal, cli,
+concurrency, state-machine, and safety surfaces. Agent A's tests are
+useful red/green evidence, but risky features should finish with the
+selected Verify goal at `PASS_EVIDENCED`; `PASS_WITH_GAPS` requires
+accepted named gaps, and
+`FAIL`/`NO_EVIDENCE` blocks promotion.
+
 ## How it runs
 
 1. **Capture intent.** Either:

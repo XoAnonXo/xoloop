@@ -387,6 +387,13 @@ test('discovery scan inventories observable surfaces and suggests harnesses', ()
   }
   assert.ok(discovery.observable_surfaces.length >= 12);
   assert.ok(discovery.automatically_verifiable.length >= 6);
+  assert.ok(discovery.function_verification.functions.length >= 2);
+  assert.ok(discovery.coverage.public_function_count >= 2);
+  assert.equal(discovery.runtime_lab.schema, 'xoloop.runtime_lab_plan.v0.1');
+  assert.ok(discovery.runtime_lab.dev_servers.length >= 2);
+  assert.ok(discovery.runtime_lab.auth_session_matrix.length >= 4);
+  assert.ok(discovery.observable_surfaces.some((surface) => surface.surface === 'function'));
+  assert.ok(discovery.observable_surfaces.some((surface) => surface.surface === 'runtime-lab'));
   for (const kind of ['frontend-suite', 'api-suite', 'state-suite', 'state-machine-suite', 'concurrency-suite', 'performance-suite', 'formal-suite', 'cli-suite']) {
     assert.ok(discovery.suggested_harnesses.some((harness) => harness.kind === kind), `expected ${kind}`);
   }
@@ -613,6 +620,10 @@ test('discovery-suite writes generated safety mock, VCR, sandbox, policy, and cr
   assert.equal(fs.existsSync(path.join(goalDir, 'safety', 'redactions', 'schema-pii-masks.json')), true);
   assert.equal(fs.existsSync(path.join(goalDir, 'safety', 'sandboxes', 'blocked-actions.json')), true);
   assert.equal(fs.existsSync(path.join(goalDir, 'safety', 'sandbox.env.example')), true);
+  assert.equal(fs.existsSync(path.join(goalDir, 'runtime-lab', 'plan.json')), true);
+  assert.equal(fs.existsSync(path.join(goalDir, 'runtime-lab', 'lab.env.example')), true);
+  assert.equal(fs.existsSync(path.join(goalDir, 'runtime-lab', 'commands', 'start.sh')), true);
+  assert.equal(fs.existsSync(path.join(goalDir, 'runtime-lab', 'fixtures', 'auth-matrix.json')), true);
   assert.ok(mockPlan.mocks.length > 0);
   assert.ok(mockPlan.vcr_recordings.length > 0);
   assert.ok(mockPlan.sandboxes.length > 0);

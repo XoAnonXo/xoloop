@@ -23,6 +23,15 @@ rubric. Champion wins twice → converged.
 - "propose a radical alternative"
 - "explore <domain> for better implementations"
 
+## Verify / Discovery gate
+
+Autoresearch changes paradigms, so run
+`xoloop-verify discover --write --json` before the Challenger loop.
+Select repo-specific suites from the detected frontend, api, state, function, runtime-lab, performance, formal,
+cli, concurrency, state-machine, and safety surfaces. A Challenger can become Champion only when the relevant goal or
+suite is `PASS_EVIDENCED`; `PASS_WITH_GAPS` requires accepted named gaps,
+and `FAIL`/`NO_EVIDENCE` blocks replacement.
+
 ## How it runs
 
 1. **Read target + current test suite.** Champion = current code.

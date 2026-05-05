@@ -15,6 +15,43 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function normalizeTradeoffs(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item, index) => {
+    if (typeof item === 'string') {
+      return {
+        id: `tradeoff-${index + 1}`,
+        description: item,
+        estimated_savings: 'unknown',
+        behavior_change: 'requires review',
+        verification_impact: 'requires explicit Verify contract update before patching',
+        requires_user_approval: true,
+      };
+    }
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+    const id = String(item.id || item.name || `tradeoff-${index + 1}`).trim() || `tradeoff-${index + 1}`;
+    return {
+      id,
+      description: String(item.description || item.summary || item.title || '').trim() || id,
+      estimated_savings: String(item.estimated_savings || item.savings || item.estimatedSavings || 'unknown'),
+      behavior_change: String(item.behavior_change || item.behaviorChange || item.user_impact || 'requires review'),
+      verification_impact: String(item.verification_impact || item.verificationImpact || 'requires explicit Verify contract update before patching'),
+      requires_user_approval: item.requires_user_approval !== false,
+    };
+  }).filter(Boolean);
+}
+
+function normalizeNotes(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    if (typeof item === 'string') return item.trim();
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      return String(item.message || item.note || item.summary || '').trim();
+    }
+    return '';
+  }).filter(Boolean);
+}
+
 function callAgentCommand(command, payload, cwd, timeoutMs = 600000) {
   const result = spawnSync('bash', ['-lc', command], {
     cwd,
@@ -40,7 +77,7 @@ function callAgentCommand(command, payload, cwd, timeoutMs = 600000) {
       'GOAL_AGENT_COMMAND_INVALID_JSON',
       'stdout',
       `agent command returned non-JSON stdout: ${err.message}`,
-      { fixHint: 'The agent command must write JSON { summary, operations } to stdout.' },
+      { fixHint: 'The agent command must write JSON { summary, operations, tradeoffs?, notes? } to stdout.' },
     );
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -49,6 +86,8 @@ function callAgentCommand(command, payload, cwd, timeoutMs = 600000) {
   return {
     summary: typeof parsed.summary === 'string' ? parsed.summary : 'no summary',
     operations: normalizeOperationSet(Array.isArray(parsed.operations) ? parsed.operations : []),
+    tradeoffs: normalizeTradeoffs(parsed.tradeoffs),
+    notes: normalizeNotes(parsed.notes),
   };
 }
 
@@ -196,7 +235,7 @@ async function runOptimiseLoop(options) {
   const goal = loaded.goal;
   const evidencePath = evidencePathForGoal(loaded.goalPath);
   const roundLimit = options.forever ? Infinity : (Number.isFinite(options.rounds) && options.rounds > 0 ? Math.floor(options.rounds) : 1);
-  const summary = { rounds: 0, accepted: 0, rejected: 0, failed: 0, noops: 0, stop_reason: 'round_limit' };
+  const summary = { rounds: 0, accepted: 0, rejected: 0, failed: 0, noops: 0, tradeoffs: [], notes: [], stop_reason: 'round_limit' };
 
   const discoveryBlocker = discoveryOptimizationBlocker(cwd, goal);
   if (discoveryBlocker.blocked) {
@@ -252,6 +291,8 @@ async function runOptimiseLoop(options) {
     }
 
     if (proposal.operations.length === 0) {
+      for (const tradeoff of proposal.tradeoffs) summary.tradeoffs.push({ round, ...tradeoff });
+      for (const note of proposal.notes) summary.notes.push({ round, note });
       appendOptimiseEvent(evidencePath, {
         goal_id: goal.goal_id,
         manifest_hash: manifestHash(goal),
@@ -259,10 +300,12 @@ async function runOptimiseLoop(options) {
         round,
         outcome: 'noop',
         summary: proposal.summary,
-        reason: 'agent returned no operations',
+        reason: proposal.tradeoffs.length > 0 ? 'agent returned tradeoff proposals only' : 'agent returned no operations',
+        tradeoffs: proposal.tradeoffs,
+        notes: proposal.notes,
       });
       summary.noops += 1;
-      summary.stop_reason = 'agent_noop';
+      summary.stop_reason = proposal.tradeoffs.length > 0 ? 'agent_tradeoff_only' : 'agent_noop';
       break;
     }
 
@@ -281,7 +324,11 @@ async function runOptimiseLoop(options) {
         outcome: 'apply_reject',
         summary: proposal.summary,
         reason: err.message,
+        tradeoffs: proposal.tradeoffs,
+        notes: proposal.notes,
       });
+      for (const tradeoff of proposal.tradeoffs) summary.tradeoffs.push({ round, ...tradeoff });
+      for (const note of proposal.notes) summary.notes.push({ round, note });
       summary.rejected += 1;
       summary.rounds += 1;
       continue;
@@ -300,7 +347,11 @@ async function runOptimiseLoop(options) {
         summary: proposal.summary,
         reason: `candidate verification failed: ${challengerCard.verdict}`,
         counterexample: challengerCard.counterexample,
+        tradeoffs: proposal.tradeoffs,
+        notes: proposal.notes,
       });
+      for (const tradeoff of proposal.tradeoffs) summary.tradeoffs.push({ round, ...tradeoff });
+      for (const note of proposal.notes) summary.notes.push({ round, note });
       summary.rejected += 1;
       summary.rounds += 1;
       championCard = buildVerifyCard(loaded.goalPath, { cwd });
@@ -323,7 +374,11 @@ async function runOptimiseLoop(options) {
         summary: proposal.summary,
         reason: evaluation.reason,
         deltas: evaluation.deltas,
+        tradeoffs: proposal.tradeoffs,
+        notes: proposal.notes,
       });
+      for (const tradeoff of proposal.tradeoffs) summary.tradeoffs.push({ round, ...tradeoff });
+      for (const note of proposal.notes) summary.notes.push({ round, note });
       summary.accepted += 1;
       summary.rounds += 1;
       championCard = challengerCard;
@@ -340,7 +395,11 @@ async function runOptimiseLoop(options) {
       summary: proposal.summary,
       reason: evaluation.reason,
       deltas: evaluation.deltas,
+      tradeoffs: proposal.tradeoffs,
+      notes: proposal.notes,
     });
+    for (const tradeoff of proposal.tradeoffs) summary.tradeoffs.push({ round, ...tradeoff });
+    for (const note of proposal.notes) summary.notes.push({ round, note });
     summary.rejected += 1;
     summary.rounds += 1;
     championCard = buildVerifyCard(loaded.goalPath, { cwd });

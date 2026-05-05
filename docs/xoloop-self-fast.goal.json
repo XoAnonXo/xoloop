@@ -1,0 +1,71 @@
+{
+  "version": 0.1,
+  "goal_id": "xoloop-self-fast",
+  "objective": "Fast self-verification gate for improving the XOLoop plugin without changing CLI or verification behavior.",
+  "interface": {
+    "type": "command-suite",
+    "command": "xoloop self fast gate",
+    "stdin": "none",
+    "stdout": "text",
+    "timeout_ms": 120000
+  },
+  "artifacts": {
+    "paths": [
+      "plugins/xoloop/bin/xoloop-optimise.cjs",
+      "plugins/xoloop/bin/xoloop-verify.cjs",
+      "plugins/xoloop/lib/goal_cli_runner.cjs",
+      "plugins/xoloop/lib/goal_complexity.cjs",
+      "plugins/xoloop/lib/goal_discovery.cjs",
+      "plugins/xoloop/lib/goal_function_scan.cjs",
+      "plugins/xoloop/lib/goal_maker.cjs",
+      "plugins/xoloop/lib/goal_manifest.cjs",
+      "plugins/xoloop/lib/goal_optimise_runner.cjs",
+      "plugins/xoloop/lib/goal_runtime_lab.cjs",
+      "plugins/xoloop/lib/goal_tradeoffs.cjs",
+      "plugins/xoloop/lib/goal_verify_runner.cjs",
+      "plugins/xoloop/test/discovery-suite.test.cjs",
+      "plugins/xoloop/test/function-scan.test.cjs",
+      "plugins/xoloop/test/goal-maker.test.cjs",
+      "plugins/xoloop/test/goal-runtime.test.cjs",
+      "plugins/xoloop/test/runtime-lab.test.cjs"
+    ]
+  },
+  "verify": {
+    "kind": "command-suite",
+    "commands": [
+      {
+        "id": "syntax-new-verify-modules",
+        "command": "node -c plugins/xoloop/lib/goal_maker.cjs && node -c plugins/xoloop/lib/goal_tradeoffs.cjs && node -c plugins/xoloop/lib/goal_function_scan.cjs && node -c plugins/xoloop/lib/goal_runtime_lab.cjs && node -c plugins/xoloop/lib/goal_cli_runner.cjs && node -c plugins/xoloop/lib/goal_complexity.cjs && node -c plugins/xoloop/bin/xoloop-verify.cjs && node -c plugins/xoloop/bin/xoloop-optimise.cjs",
+        "expect_exit_code": 0,
+        "timeout_ms": 30000
+      },
+      {
+        "id": "focused-verify-runtime-tests",
+        "command": "node --test plugins/xoloop/test/goal-maker.test.cjs plugins/xoloop/test/goal-runtime.test.cjs plugins/xoloop/test/function-scan.test.cjs plugins/xoloop/test/runtime-lab.test.cjs plugins/xoloop/test/discovery-suite.test.cjs",
+        "expect_exit_code": 0,
+        "timeout_ms": 120000
+      },
+      {
+        "id": "diff-hygiene",
+        "command": "git diff --check",
+        "expect_exit_code": 0,
+        "timeout_ms": 30000
+      }
+    ]
+  },
+  "metrics": {
+    "repeat": 1,
+    "targets": [
+      {
+        "name": "complexity_score",
+        "direction": "minimize",
+        "threshold": 0.01
+      }
+    ]
+  },
+  "acceptance": {
+    "require_all_verifications": true,
+    "max_metric_regression": 0,
+    "accept_if_any_target_improves": true
+  }
+}

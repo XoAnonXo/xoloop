@@ -23,6 +23,29 @@ about (latency, memory, cost, throughput).
 - "optimize for <metric>"
 - "beat this baseline"
 
+## Verify / Discovery gate
+
+Before any optimization round, run `xoloop-verify discover --write --json`
+and select repo-specific suites from the detected frontend, api, state, function, runtime-lab, performance, formal,
+cli, concurrency, state-machine, and safety surfaces. Use `performance-suite` for the metric plus the matching
+behavior suite(s) for correctness. Start improving only when those goals
+are `PASS_EVIDENCED`; `PASS_WITH_GAPS` requires accepted named gaps, and
+`FAIL`/`NO_EVIDENCE` blocks optimization.
+
+For broad objectives without a ready benchmark, generate the goal after
+discovery:
+
+```bash
+xoloop-verify make-goal --objective "make backend cheaper/faster"
+```
+
+Use the generated suite goal to identify the metric, correctness suites,
+accepted gaps, objective-specific bottleneck metrics, generated benchmark
+harnesses, exact screen/API/function/state obligation chains, cost/APM/DB/
+queue/infra inputs, and tradeoff policy. Behavior-changing cost savings are
+proposal-only until the user accepts the tradeoff explicitly with
+`xoloop-verify tradeoff <goal.yaml> --accept <id>`.
+
 ## How it runs
 
 1. **Initialize the session** via

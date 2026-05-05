@@ -1,7 +1,7 @@
 'use strict';
 
-const { spawn } = require('node:child_process');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
+const path = require('node:path');
 
 function sampleProcessTreeRssMb(pid) {
   try {
@@ -55,11 +55,14 @@ function runCliCommand(command, input, options = {}) {
     let timedOut = false;
     let peakMemoryMb = 0;
 
+    const nodeBinDir = path.dirname(process.execPath);
     const childEnv = { ...process.env, ...(options.env || {}) };
+    childEnv.XOLOOP_NODE = process.execPath;
+    childEnv.PATH = `${nodeBinDir}${path.delimiter}${childEnv.PATH || ''}`;
     delete childEnv.NODE_TEST_CONTEXT;
     delete childEnv.NODE_CHANNEL_FD;
 
-    const child = spawn('bash', ['-lc', command], {
+    const child = spawn('bash', ['-c', command], {
       cwd,
       env: childEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -67,12 +70,14 @@ function runCliCommand(command, input, options = {}) {
 
     const sampler = setInterval(() => {
       peakMemoryMb = Math.max(peakMemoryMb, sampleProcessTreeRssMb(child.pid));
-    }, 20);
+    }, 250);
+    if (typeof sampler.unref === 'function') sampler.unref();
 
     const timeout = setTimeout(() => {
       timedOut = true;
       try { child.kill('SIGKILL'); } catch (_err) { /* already gone */ }
     }, timeoutMs);
+    if (typeof timeout.unref === 'function') timeout.unref();
 
     child.stdout.on('data', (chunk) => {
       stdout += chunk.toString('utf8');
