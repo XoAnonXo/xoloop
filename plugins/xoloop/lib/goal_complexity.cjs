@@ -4,12 +4,71 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 function countBranchTokens(text) {
-  const stripped = String(text)
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/\/\/.*$/gm, ' ')
-    .replace(/(['"`])(?:\\.|(?!\1)[\s\S])*\1/g, '""');
+  const stripped = stripCommentsAndStrings(String(text));
   const matches = stripped.match(/\b(if|for|while|case|catch|switch)\b|&&|\|\||\?/g);
   return matches ? matches.length : 0;
+}
+
+function stripCommentsAndStrings(text) {
+  let out = '';
+  let state = 'code';
+  let escape = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const ch = text[index];
+    const next = text[index + 1] || '';
+    if (state === 'line') {
+      if (ch === '\n') {
+        state = 'code';
+        out += '\n';
+      } else {
+        out += ' ';
+      }
+      continue;
+    }
+    if (state === 'block') {
+      if (ch === '*' && next === '/') {
+        state = 'code';
+        out += '  ';
+        index += 1;
+      } else {
+        out += ch === '\n' ? '\n' : ' ';
+      }
+      continue;
+    }
+    if (state === 'single' || state === 'double' || state === 'template') {
+      const end = state === 'single' ? "'" : (state === 'double' ? '"' : '`');
+      out += ch === '\n' ? '\n' : ' ';
+      if (escape) {
+        escape = false;
+      } else if (ch === '\\') {
+        escape = true;
+      } else if (ch === end) {
+        state = 'code';
+      }
+      continue;
+    }
+    if (ch === '/' && next === '/') {
+      state = 'line';
+      out += '  ';
+      index += 1;
+    } else if (ch === '/' && next === '*') {
+      state = 'block';
+      out += '  ';
+      index += 1;
+    } else if (ch === "'") {
+      state = 'single';
+      out += ' ';
+    } else if (ch === '"') {
+      state = 'double';
+      out += ' ';
+    } else if (ch === '`') {
+      state = 'template';
+      out += ' ';
+    } else {
+      out += ch;
+    }
+  }
+  return out;
 }
 
 function measureComplexity(goal, cwd) {
@@ -73,4 +132,5 @@ function measureComplexity(goal, cwd) {
 module.exports = {
   countBranchTokens,
   measureComplexity,
+  stripCommentsAndStrings,
 };

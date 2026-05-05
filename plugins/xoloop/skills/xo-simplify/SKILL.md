@@ -33,6 +33,16 @@ User says any of:
 - "kill the wrapper around Z"
 - "inline the adapter"
 
+## Verify / Discovery gate
+
+Simplify is deletion-heavy, so run `xoloop-verify discover --write --json`
+before removing abstractions beyond tiny local dead code. Select
+repo-specific suites from the detected frontend, api, state, function, runtime-lab, performance,
+formal, cli, concurrency, state-machine, and safety surfaces. Deletion
+rounds may start only after the relevant Verify goal is `PASS_EVIDENCED`;
+`PASS_WITH_GAPS` requires accepted named gaps, and `FAIL`/`NO_EVIDENCE`
+blocks the mutating loop.
+
 ## When NOT to invoke
 
 - "rename this" → use `xo-polish`

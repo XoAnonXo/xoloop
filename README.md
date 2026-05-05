@@ -118,6 +118,12 @@ artifacts, runs black-box obligations, appends evidence to
 `evidence.jsonl`, and emits a card with `FAIL`, `NO_EVIDENCE`,
 `PASS_WITH_GAPS`, or `PASS_EVIDENCED`.
 
+To dogfood XOLoop on this plugin itself, see
+[docs/DOGFOODING.md](docs/DOGFOODING.md). The short version is: run broad
+discovery for the map, copy `docs/xoloop-self-fast.goal.json` into
+`.xoloop/goals/xoloop-self-fast/goal.yaml` for the fast inner-loop gate,
+and reserve the full suite for pre/post checks.
+
 The generic path is `verify.kind: general-io`: put JSON case files under
 `cases/*.json`, declare a CLI command, and Verify checks exit code,
 exact/substring stdout and stderr expectations, plus optional properties

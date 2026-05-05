@@ -24,6 +24,16 @@ deterministic given a seed.
 - "what inputs crash this?"
 - "throw random data at this and see what breaks"
 
+## Verify / Discovery use
+
+Fuzz is read-only, but it should feed Verify before risky refactor or
+optimization work. Run `xoloop-verify discover --write --json`, select
+repo-specific suites from detected frontend, api, state, function, runtime-lab, performance,
+formal, cli, concurrency, state-machine, and safety surfaces, then add
+crash corpus or property cases to the matching goal. Treat
+`PASS_EVIDENCED` as usable evidence; keep `PASS_WITH_GAPS` visible and
+require accepted named gaps before downstream mutation.
+
 ## How to invoke
 
 ```bash

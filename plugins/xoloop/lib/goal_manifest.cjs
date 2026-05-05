@@ -474,6 +474,9 @@ function normalizeGoalDocument(document) {
   const acceptance = document.acceptance && typeof document.acceptance === 'object' && !Array.isArray(document.acceptance)
     ? document.acceptance
     : {};
+  const goalMaker = document.goal_maker && typeof document.goal_maker === 'object' && !Array.isArray(document.goal_maker)
+    ? document.goal_maker
+    : null;
   const artifacts = document.artifacts && typeof document.artifacts === 'object' && !Array.isArray(document.artifacts)
     ? document.artifacts
     : {};
@@ -553,6 +556,7 @@ function normalizeGoalDocument(document) {
     artifacts: {
       paths: Array.isArray(artifacts.paths) ? normalizeStringArray(artifacts.paths, 'artifacts.paths') : [],
     },
+    ...(goalMaker ? { goal_maker: goalMaker } : {}),
     verify: {
       ...normalizedVerify,
     },
@@ -580,6 +584,15 @@ function normalizeGoalDocument(document) {
       accepted_discovery_gaps: Array.isArray(acceptance.accepted_discovery_gaps)
         ? normalizeStringArray(acceptance.accepted_discovery_gaps, 'acceptance.accepted_discovery_gaps')
         : [],
+      accepted_tradeoffs: Array.isArray(acceptance.accepted_tradeoffs)
+        ? normalizeStringArray(acceptance.accepted_tradeoffs, 'acceptance.accepted_tradeoffs')
+        : [],
+      rejected_tradeoffs: Array.isArray(acceptance.rejected_tradeoffs)
+        ? normalizeStringArray(acceptance.rejected_tradeoffs, 'acceptance.rejected_tradeoffs')
+        : [],
+      ...(typeof acceptance.tradeoff_policy === 'string' && acceptance.tradeoff_policy.trim()
+        ? { tradeoff_policy: acceptance.tradeoff_policy.trim() }
+        : {}),
     },
   };
 

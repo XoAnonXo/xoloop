@@ -11,6 +11,8 @@ const { scanFrontendRepo } = require('./goal_frontend_scan.cjs');
 const { scanPerformanceRepo } = require('./goal_performance_scan.cjs');
 const { scanStateMachineRepo } = require('./goal_state_machine_scan.cjs');
 const { scanStateRepo } = require('./goal_state_scan.cjs');
+const { scanFunctionRepo } = require('./goal_function_scan.cjs');
+const { buildRuntimeLabPlan, writeRuntimeLabAssets } = require('./goal_runtime_lab.cjs');
 const {
   artifactHash,
   evidencePathForGoal,
@@ -33,6 +35,8 @@ const DEFAULT_DISCOVERY_OBLIGATIONS = [
   'repo_topology',
   'dataflow_analysis',
   'safety_classification',
+  'function_inventory',
+  'runtime_lab',
   'remediation_plan',
   'optimization_block',
   'gap_acceptance',
@@ -612,6 +616,39 @@ const SEMANTIC_GAP_RULES = [
       'Block optimization until unsafe classifications are covered by the mapped harness obligations or explicitly accepted.',
     ],
   },
+  {
+    type: 'function-level-verification',
+    surfaces: ['function'],
+    match: /function|property|fuzz|side-effect|oracle|differential/i,
+    severity: 'high',
+    risk: 'Public functions can be refactored without direct input/output or side-effect oracles.',
+    coverage: [
+      { kind: 'formal-suite', obligations: ['property_fuzz', 'function_module_coverage', 'mutation_score'] },
+      { kind: 'command-suite', obligations: ['case_present'] },
+    ],
+    remediation: [
+      'Generate function-level cases for public/exported functions.',
+      'Use property fuzzing for pure candidates and trace/state contracts for side-effectful functions.',
+      'Add differential tests against the current implementation before optimizing internals.',
+    ],
+  },
+  {
+    type: 'runtime-lab-fixtures',
+    surfaces: ['runtime-lab'],
+    match: /runtime lab|auth|session|tenant|seed|reset|serve|dev server|mock|vcr/i,
+    severity: 'high',
+    risk: 'Whole-app verification is weak without an isolated lab for services, auth, tenants, state, and third-party effects.',
+    coverage: [
+      { kind: 'frontend-suite', obligations: ['visual_perception', 'interaction_behavior', 'network_contract'] },
+      { kind: 'api-suite', obligations: ['auth_matrix', 'third_party_replay', 'vcr_replay'] },
+      { kind: 'state-suite', obligations: ['orchestration', 'fixture_strategy', 'generated_tenant_matrix'] },
+    ],
+    remediation: [
+      'Create runtime-lab assets with env templates, service start/ready/stop commands, seed/reset hooks, and auth/session fixtures.',
+      'Route third-party effects through mocks or VCR recordings.',
+      'Block full-app optimization until the lab can boot and replay critical flows.',
+    ],
+  },
 ];
 
 function sanitizeId(value) {
@@ -636,6 +673,64 @@ function unique(values) {
 
 function count(value) {
   return asArray(value).length;
+}
+
+function functionScanSummary(scan) {
+  const functions = asArray(scan && scan.functions);
+  const publicFunctions = functions.filter((fn) =>
+    fn && (fn.visibility === 'public' || fn.visibility === 'exported' || fn.exported === true),
+  );
+  const sideEffectful = functions.filter((fn) => {
+    const purity = fn && fn.purity;
+    if (typeof purity === 'string') return /side[-_]?effect/i.test(purity);
+    return asObject(purity).classification === 'side_effectful';
+  });
+  return {
+    function_count: functions.length,
+    public_function_count: publicFunctions.length,
+    side_effectful_count: sideEffectful.length,
+    pure_candidate_count: functions.length - sideEffectful.length,
+    generated_case_count: asArray(scan && scan.generated_cases).length,
+    harness_suggestion_count: asArray(scan && scan.harness_suggestions).length,
+    missing_obligation_count: asArray(scan && scan.missing_obligations).length,
+  };
+}
+
+function publicFunctionsForScan(scan) {
+  return asArray(scan && scan.functions).filter((fn) =>
+    fn && (fn.visibility === 'public' || fn.visibility === 'exported' || fn.exported === true),
+  );
+}
+
+function functionArtifactPaths(scan) {
+  return unique([
+    ...asArray(scan && scan.files),
+    ...asArray(scan && scan.test_files),
+  ]);
+}
+
+function purityLabel(fn) {
+  const purity = fn && fn.purity;
+  if (typeof purity === 'string') return purity;
+  return asObject(purity).classification || 'unknown';
+}
+
+function runtimeLabSummary(lab) {
+  const summary = asObject(lab && lab.summary);
+  return {
+    dev_server_count: Number(summary.dev_server_count || asArray(lab && lab.dev_servers).length || 0),
+    service_count: Number(summary.service_count || asArray(lab && lab.orchestration && lab.orchestration.services).length || 0),
+    auth_session_count: Number(summary.auth_session_count || asArray(lab && lab.auth_session_matrix).length || 0),
+    third_party_provider_count: Number(summary.third_party_provider_count || asArray(lab && lab.third_party && lab.third_party.providers).length || 0),
+    blocked_action_count: Number(summary.blocked_action_count || asArray(lab && lab.blocks).length || 0),
+    seed_reset_hook_count: [
+      ...asArray(lab && lab.seed_reset_hooks && lab.seed_reset_hooks.before_all),
+      ...asArray(lab && lab.seed_reset_hooks && lab.seed_reset_hooks.before_each),
+      ...asArray(lab && lab.seed_reset_hooks && lab.seed_reset_hooks.after_each),
+      ...asArray(lab && lab.seed_reset_hooks && lab.seed_reset_hooks.after_all),
+    ].length,
+    readiness_check_count: asArray(lab && lab.readiness_checks).length,
+  };
 }
 
 function writeJson(filePath, payload) {
@@ -717,6 +812,7 @@ function collectScans(cwd) {
     concurrency: scanConcurrencyRepo(cwd),
     performance: scanPerformanceRepo(cwd),
     formal: scanFormalRepo(cwd),
+    function: scanFunctionRepo(cwd),
   };
 }
 
@@ -1544,6 +1640,10 @@ function normalizeText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function isGeneratedXoloopSource(value) {
+  return String(value || '').replace(/\\/g, '/').startsWith('.xoloop/goals/');
+}
+
 function textMatches(text, pattern) {
   return pattern.test(String(text || ''));
 }
@@ -2153,16 +2253,18 @@ function collectApiSafetyCandidates(cwd, scan) {
 }
 
 function collectCliSafetyCandidates(scan) {
-  return asArray(scan && scan.commands).map((command) => ({
-    surface: 'cli',
-    kind: 'cli-command',
-    source: command.source || '',
-    file: command.source || '',
-    label: command.id,
-    command: command.command,
-    risk: command.risk,
-    text: `${command.id} ${command.command} ${command.source || ''}`,
-  }));
+  return asArray(scan && scan.commands)
+    .filter((command) => !isGeneratedXoloopSource(command.source))
+    .map((command) => ({
+      surface: 'cli',
+      kind: 'cli-command',
+      source: command.source || '',
+      file: command.source || '',
+      label: command.id,
+      command: command.command,
+      risk: command.risk,
+      text: `${command.id} ${command.command} ${command.source || ''}`,
+    }));
 }
 
 function collectStateSafetyCandidates(cwd, scan) {
@@ -2818,6 +2920,41 @@ function safetyGaps(safety, acceptedSet, existingHarnesses) {
   return gaps.sort((a, b) => a.id.localeCompare(b.id));
 }
 
+function functionGaps(functionScan, acceptedSet, existingHarnesses) {
+  const scan = functionScan || {};
+  const summary = functionScanSummary(scan);
+  const publicCount = summary.public_function_count;
+  const sideEffectCount = summary.side_effectful_count;
+  const gaps = [];
+  if (publicCount > 0) {
+    gaps.push(makeGap('function', 'public functions need generated input/output cases, property fuzzing, and differential oracles', acceptedSet, 0));
+  }
+  if (sideEffectCount > 0) {
+    gaps.push(makeGap('function', 'side-effectful functions need explicit filesystem/network/state/time contracts', acceptedSet, 0));
+  }
+  return gaps
+    .map((gap) => coveredGap(gap, coverageForGap(gap, existingHarnesses)))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function runtimeLabGaps(runtimeLab, acceptedSet, existingHarnesses) {
+  const lab = runtimeLab || {};
+  const summary = runtimeLabSummary(lab);
+  const gaps = [];
+  if (summary.dev_server_count === 0) {
+    gaps.push(makeGap('runtime-lab', 'runtime lab has no safe serve command for whole-app replay', acceptedSet, 0));
+  }
+  if (summary.seed_reset_hook_count === 0) {
+    gaps.push(makeGap('runtime-lab', 'runtime lab needs seed and reset hooks for deterministic app state', acceptedSet, 0));
+  }
+  if (summary.blocked_action_count > 0 || summary.third_party_provider_count > 0) {
+    gaps.push(makeGap('runtime-lab', 'runtime lab must route destructive and third-party effects through mocks, VCR, or sandbox fixtures', acceptedSet, 0));
+  }
+  return gaps
+    .map((gap) => coveredGap(gap, coverageForGap(gap, existingHarnesses)))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
 function repoDiscoveryPath(cwd) {
   return path.join(path.resolve(cwd || process.cwd()), '.xoloop', 'discovery.json');
 }
@@ -2833,6 +2970,13 @@ function discoverRepo(cwd = process.cwd(), options = {}) {
   const topology = options.topology || scanRepoTopology(root);
   const dataflow = options.dataflow || analyzeDataflow(root, scans, topology);
   const safety = options.safety || buildSafetyClassification(root, scans, topology, dataflow, options);
+  const runtimeLab = options.runtimeLab || options.runtime_lab || buildRuntimeLabPlan({
+    cwd: root,
+    goalId: options.goalId || options.goal_id || 'runtime-lab',
+    scans,
+    repo_topology: topology,
+    safety,
+  });
   const scanBySurface = {
     frontend: scans.frontend,
     api: scans.api,
@@ -2847,11 +2991,15 @@ function discoverRepo(cwd = process.cwd(), options = {}) {
   const topologyGapList = topologyGaps(topology, acceptedSet, existingHarnesses);
   const dataflowGapList = dataflowGaps(dataflow, acceptedSet, existingHarnesses);
   const safetyGapList = safetyGaps(safety, acceptedSet, existingHarnesses);
+  const functionGapList = functionGaps(scans.function, acceptedSet, existingHarnesses);
+  const runtimeLabGapList = runtimeLabGaps(runtimeLab, acceptedSet, existingHarnesses);
   const gaps = [
     ...surfaces.flatMap((surface) => surface.gaps),
     ...topologyGapList,
     ...dataflowGapList,
     ...safetyGapList,
+    ...functionGapList,
+    ...runtimeLabGapList,
   ].sort((a, b) => a.id.localeCompare(b.id));
   const blockingGaps = gaps.filter((gap) => gap.blocks_optimization);
   const surfaceHarnesses = surfaces.flatMap((surface) => surface.suggested_harnesses);
@@ -2877,6 +3025,16 @@ function discoverRepo(cwd = process.cwd(), options = {}) {
     surface: 'safety',
     description: `${action.decision} ${action.surface}/${action.kind}: ${action.label || action.id}`,
   }));
+  const functionObservables = publicFunctionsForScan(scans.function).slice(0, 120).map((fn) => ({
+    surface: 'function',
+    description: `${purityLabel(fn)} ${fn.language} function ${fn.name} in ${fn.file}:${fn.line}`,
+  }));
+  const runtimeLabObservables = [
+    ...asArray(runtimeLab.dev_servers).map((server) => ({ surface: 'runtime-lab', description: `dev server: ${server.id} ${server.lab_command || server.command}` })),
+    ...asArray(runtimeLab.readiness_checks).map((check) => ({ surface: 'runtime-lab', description: `readiness check: ${check.id}` })),
+    ...asArray(runtimeLab.auth_session_matrix).slice(0, 40).map((session) => ({ surface: 'runtime-lab', description: `auth session fixture: ${session.id}` })),
+    ...asArray(runtimeLab.third_party && runtimeLab.third_party.providers).map((provider) => ({ surface: 'runtime-lab', description: `third-party mock: ${provider.provider}` })),
+  ];
   const observableSurfaces = [
     ...surfaces.flatMap((surface) =>
       surface.observable_surfaces.map((description) => ({
@@ -2887,10 +3045,13 @@ function discoverRepo(cwd = process.cwd(), options = {}) {
     ...topologyObservables,
     ...dataflowObservables,
     ...safetyObservables,
+    ...functionObservables,
+    ...runtimeLabObservables,
   ];
   const artifactPaths = unique([
     ...surfaces.flatMap((surface) => surface.artifact_paths),
     ...asArray(topology.artifact_paths),
+    ...functionArtifactPaths(scans.function),
   ]);
   const detectedSurfaces = surfaces.filter((surface) => surface.detected);
   const automaticSurfaces = surfaces.filter((surface) => surface.detected && surface.automatically_verifiable);
@@ -2917,6 +3078,8 @@ function discoverRepo(cwd = process.cwd(), options = {}) {
     repo_topology: topology,
     dataflow,
     safety,
+    function_verification: scans.function,
+    runtime_lab: runtimeLab,
     surfaces,
     observable_surfaces: observableSurfaces,
     automatically_verifiable: automaticSurfaces.map((surface) => ({
@@ -2959,6 +3122,18 @@ function discoverRepo(cwd = process.cwd(), options = {}) {
       schema_pii_signal_count: safety.summary.schema_pii_signal_count,
       static_taint_flow_count: safety.summary.static_taint_flow_count,
       safety_call_graph_path_count: safety.summary.call_graph_path_count,
+      function_count: functionScanSummary(scans.function).function_count,
+      public_function_count: functionScanSummary(scans.function).public_function_count,
+      side_effectful_function_count: functionScanSummary(scans.function).side_effectful_count,
+      runtime_lab_dev_server_count: runtimeLabSummary(runtimeLab).dev_server_count,
+      runtime_lab_service_count: runtimeLabSummary(runtimeLab).service_count,
+      runtime_lab_auth_session_count: runtimeLabSummary(runtimeLab).auth_session_count,
+      runtime_lab_third_party_provider_count: runtimeLabSummary(runtimeLab).third_party_provider_count,
+      runtime_lab_blocked_action_count: runtimeLabSummary(runtimeLab).blocked_action_count,
+      runtime_lab_readiness_check_count: runtimeLabSummary(runtimeLab).readiness_check_count,
+      runtime_lab_seed_reset_hook_count: runtimeLabSummary(runtimeLab).seed_reset_hook_count,
+      runtime_lab_serve_command_count: runtimeLabSummary(runtimeLab).dev_server_count,
+      runtime_lab_auth_role_count: runtimeLabSummary(runtimeLab).auth_session_count,
       automatically_verifiable_surface_count: automaticSurfaces.length,
       suggested_harness_count: suggestedHarnesses.length,
       gap_count: gaps.length,
@@ -3124,6 +3299,7 @@ function writeDiscoverySuiteAssets(goalDir, options = {}) {
   writeJson(path.join(goalDir, 'reports', 'initial-discovery.json'), discovery);
   writeJson(path.join(goalDir, 'suggestions', 'harnesses.json'), discovery.suggested_harnesses);
   writeSafetyGeneratedAssets(goalDir, discovery);
+  writeRuntimeLabAssets(path.join(goalDir, 'runtime-lab'), discovery.runtime_lab);
   fs.writeFileSync(path.join(goalDir, 'README.md'), [
     '# Discovery verification goal',
     '',
@@ -3275,6 +3451,26 @@ async function runDiscoverySuiteVerification(goal, goalPath, options = {}) {
     policy: discovery.safety.policy,
   });
 
+  verifications.push({
+    id: 'function_inventory',
+    status: 'pass',
+    function_count: discovery.coverage.function_count,
+    public_function_count: discovery.coverage.public_function_count,
+    side_effectful_function_count: discovery.coverage.side_effectful_function_count,
+  });
+
+  verifications.push({
+    id: 'runtime_lab',
+    status: 'pass',
+    dev_server_count: discovery.coverage.runtime_lab_dev_server_count,
+    service_count: discovery.coverage.runtime_lab_service_count,
+    auth_session_count: discovery.coverage.runtime_lab_auth_session_count,
+    third_party_provider_count: discovery.coverage.runtime_lab_third_party_provider_count,
+    blocked_action_count: discovery.coverage.runtime_lab_blocked_action_count,
+    readiness_check_count: discovery.coverage.runtime_lab_readiness_check_count,
+    seed_reset_hook_count: discovery.coverage.runtime_lab_seed_reset_hook_count,
+  });
+
   if (discovery.remediation_plan.length > 0 || discovery.blocking_gaps.length === 0) {
     verifications.push({
       id: 'remediation_plan',
@@ -3358,6 +3554,16 @@ async function runDiscoverySuiteVerification(goal, goalPath, options = {}) {
       schema_pii_signal_count: discovery.coverage.schema_pii_signal_count,
       static_taint_flow_count: discovery.coverage.static_taint_flow_count,
       safety_call_graph_path_count: discovery.coverage.safety_call_graph_path_count,
+      function_count: discovery.coverage.function_count,
+      public_function_count: discovery.coverage.public_function_count,
+      side_effectful_function_count: discovery.coverage.side_effectful_function_count,
+      runtime_lab_dev_server_count: discovery.coverage.runtime_lab_dev_server_count,
+      runtime_lab_service_count: discovery.coverage.runtime_lab_service_count,
+      runtime_lab_auth_session_count: discovery.coverage.runtime_lab_auth_session_count,
+      runtime_lab_third_party_provider_count: discovery.coverage.runtime_lab_third_party_provider_count,
+      runtime_lab_blocked_action_count: discovery.coverage.runtime_lab_blocked_action_count,
+      runtime_lab_readiness_check_count: discovery.coverage.runtime_lab_readiness_check_count,
+      runtime_lab_seed_reset_hook_count: discovery.coverage.runtime_lab_seed_reset_hook_count,
     },
     environment: {
       discovery_path: reportPaths.root,
@@ -3438,6 +3644,8 @@ module.exports = {
   runDiscoverySuiteVerification,
   analyzeDataflow,
   scanRepoTopology,
+  scanFunctionRepo,
+  buildRuntimeLabPlan,
   writeDiscoveryReport,
   writeDiscoverySuiteAssets,
 };

@@ -72,6 +72,13 @@ async function main() {
     console.log(`Rejected: ${summary.rejected}`);
     console.log(`Noops:    ${summary.noops}`);
     console.log(`Stop:     ${summary.stop_reason}`);
+    if (Array.isArray(summary.tradeoffs) && summary.tradeoffs.length > 0) {
+      console.log(`Tradeoffs: ${summary.tradeoffs.length}`);
+      for (const tradeoff of summary.tradeoffs.slice(0, 5)) {
+        console.log(`- ${tradeoff.id}: ${tradeoff.description} (${tradeoff.estimated_savings})`);
+      }
+    }
+    if (Array.isArray(summary.notes) && summary.notes.length > 0) console.log(`Notes:    ${summary.notes.length}`);
     if (summary.error) console.log(`Error:    ${summary.error}`);
     if (summary.final_card) console.log(`Verdict:  ${summary.final_card.verdict}`);
   }

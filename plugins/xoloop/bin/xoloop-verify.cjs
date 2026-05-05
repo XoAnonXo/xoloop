@@ -36,11 +36,15 @@ const {
   scanCliRepo,
   scanConcurrencyRepo,
   scanFormalRepo,
+  scanFunctionRepo,
   scanFrontendRepo,
   scanPerformanceRepo,
+  buildRuntimeLabPlan,
   scanStateMachineRepo,
   scanStateRepo,
 } = requireLib('goal_verify_runner.cjs');
+const { makeImprovementGoal } = requireLib('goal_maker.cjs');
+const { decideTradeoff, listTradeoffs } = requireLib('goal_tradeoffs.cjs');
 
 function printHelp() {
   console.log([
@@ -56,8 +60,10 @@ function printHelp() {
     '  xoloop-verify create --kind formal-suite --goal-id <id> [--force]',
     '  xoloop-verify create --kind suite --goal-id <id> [--surfaces cli,frontend,api,state,state-machine,performance,formal|all|detected] [--force]',
     '  xoloop-verify create --kind discovery-suite --goal-id <id> [--force]',
+    '  xoloop-verify make-goal --objective "make backend cheaper" [--target backend|frontend|state|cli|fullstack] [--metric speed|cost|memory|size] [--goal-id <id>] [--force]',
     '  xoloop-verify discover [--json] [--write] [--accept-gaps <id,id>]',
-    '  xoloop-verify scan [--surface cli|api|frontend|state|state-machine|concurrency|performance|formal|safety|discovery|all] [--json]',
+    '  xoloop-verify tradeoff <goal.yaml> [--list|--accept <id>|--reject <id>] [--reason "..."] [--json]',
+    '  xoloop-verify scan [--surface cli|api|frontend|state|state-machine|concurrency|performance|formal|function|runtime-lab|safety|discovery|all] [--json]',
     '  xoloop-verify run <general-io goal.yaml> [--suite <id>] [--case <id>] [--update-baselines] [--json]',
     '  xoloop-verify run <goal.yaml> [--suite <id>] [--case <id>] [--json]',
     '  xoloop-verify freeze-baselines <goal.yaml> [--suite <id>] [--case <id>] [--json]',
@@ -69,6 +75,19 @@ function parseCsvFlag(argv, flag) {
   const raw = parseFlag(argv, flag, '');
   if (!raw) return [];
   return String(raw).split(',').map((part) => part.trim()).filter(Boolean);
+}
+
+function positionalObjective(argv) {
+  const out = [];
+  for (let index = 1; index < argv.length; index += 1) {
+    const item = argv[index];
+    if (String(item).startsWith('--')) {
+      if (index + 1 < argv.length && !String(argv[index + 1]).startsWith('--')) index += 1;
+      continue;
+    }
+    out.push(item);
+  }
+  return out.join(' ').trim();
 }
 
 function printDiscovery(result) {
@@ -120,6 +139,70 @@ async function main() {
     return;
   }
 
+  if (sub === 'make-goal' || sub === 'goal' || sub === 'goal-maker') {
+    const objective = parseFlag(argv, '--objective', null)
+      || parseFlag(argv, '--prompt', null)
+      || parseFlag(argv, '--intent', null)
+      || positionalObjective(argv);
+    const result = makeImprovementGoal({
+      cwd: process.cwd(),
+      objective,
+      target: parseFlag(argv, '--target', ''),
+      metric: parseFlag(argv, '--metric', ''),
+      goalId: parseFlag(argv, '--goal-id', null),
+      surfaces: parseFlag(argv, '--surfaces', parseFlag(argv, '--surface', '')),
+      threshold: Number.parseFloat(parseFlag(argv, '--threshold', '0.03')),
+      repeat: Number.parseInt(parseFlag(argv, '--repeat', '3'), 10),
+      acceptedGaps: [
+        ...parseCsvFlag(argv, '--accept-gaps'),
+        ...parseCsvFlag(argv, '--accepted-gaps'),
+      ],
+      force: hasFlag(argv, '--force'),
+      useExistingDiscovery: hasFlag(argv, '--use-existing-discovery'),
+    });
+    if (json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`Created improvement goal: ${result.goalPath}`);
+      console.log(`Intent: ${result.plan.intent.target}/${result.plan.intent.metric}`);
+      console.log(`Surfaces: ${result.plan.selected_surfaces.join(', ') || 'none'}`);
+      console.log(`Targets: ${result.plan.metric_targets.map((target) => target.name).join(', ') || 'none'}`);
+      console.log(`Optimization gate: ${result.plan.optimization_gate.ready ? 'ready after PASS_EVIDENCED' : 'blocked by discovery gaps'}`);
+      if (!result.plan.optimization_gate.ready) {
+        console.log(`Blocking gaps: ${result.plan.optimization_gate.blocking_gap_ids.join(', ')}`);
+      }
+      console.log(`Agent prompt: ${require('path').join(require('path').dirname(result.goalPath), 'agent-prompt.md')}`);
+    }
+    return;
+  }
+
+  if (sub === 'tradeoff' || sub === 'tradeoffs') {
+    const goalPath = argv[1];
+    if (!goalPath) throw new Error('xoloop-verify tradeoff requires <goal.yaml>');
+    const acceptId = parseFlag(argv, '--accept', null);
+    const rejectId = parseFlag(argv, '--reject', null);
+    const reason = parseFlag(argv, '--reason', '');
+    const result = acceptId
+      ? decideTradeoff(goalPath, acceptId, 'accepted', { reason })
+      : rejectId
+        ? decideTradeoff(goalPath, rejectId, 'rejected', { reason })
+        : listTradeoffs(goalPath);
+    if (json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else if (acceptId || rejectId) {
+      console.log(`${result.decision === 'accepted' ? 'Accepted' : 'Rejected'} tradeoff: ${result.tradeoff_id}`);
+      console.log(`Ledger: ${result.ledger_path}`);
+    } else {
+      const tradeoffs = result.tradeoffs || [];
+      console.log(`Tradeoffs: ${tradeoffs.length}`);
+      for (const tradeoff of tradeoffs) {
+        const decision = tradeoff.decision ? tradeoff.decision.decision : 'pending';
+        console.log(`- ${tradeoff.id}: ${decision} - ${tradeoff.description} (${tradeoff.estimated_savings})`);
+      }
+    }
+    return;
+  }
+
   if (sub === 'scan') {
     const surface = parseFlag(argv, '--surface', 'frontend');
     const result = surface === 'cli'
@@ -136,6 +219,15 @@ async function main() {
         ? scanPerformanceRepo(process.cwd())
       : surface === 'formal' || surface === 'static' || surface === 'security'
         ? scanFormalRepo(process.cwd())
+      : surface === 'function' || surface === 'functions'
+        ? scanFunctionRepo(process.cwd())
+      : surface === 'runtime-lab' || surface === 'lab'
+        ? discoverRepo(process.cwd(), {
+            acceptedGaps: [
+              ...parseCsvFlag(argv, '--accept-gaps'),
+              ...parseCsvFlag(argv, '--accepted-gaps'),
+            ],
+          }).runtime_lab
       : surface === 'safety'
         ? discoverRepo(process.cwd(), {
             acceptedGaps: [
@@ -151,7 +243,7 @@ async function main() {
             ],
           })
       : surface === 'all'
-        ? { schema: 'xoloop.scan.v0.1', cli: scanCliRepo(process.cwd()), api: scanApiRepo(process.cwd()), frontend: scanFrontendRepo(process.cwd()), state: scanStateRepo(process.cwd()), state_machine: scanStateMachineRepo(process.cwd()), concurrency: scanConcurrencyRepo(process.cwd()), performance: scanPerformanceRepo(process.cwd()), formal: scanFormalRepo(process.cwd()), safety: discoverRepo(process.cwd()).safety }
+        ? { schema: 'xoloop.scan.v0.1', cli: scanCliRepo(process.cwd()), api: scanApiRepo(process.cwd()), frontend: scanFrontendRepo(process.cwd()), state: scanStateRepo(process.cwd()), state_machine: scanStateMachineRepo(process.cwd()), concurrency: scanConcurrencyRepo(process.cwd()), performance: scanPerformanceRepo(process.cwd()), formal: scanFormalRepo(process.cwd()), function: scanFunctionRepo(process.cwd()), safety: discoverRepo(process.cwd()).safety, runtime_lab: discoverRepo(process.cwd()).runtime_lab }
         : scanFrontendRepo(process.cwd());
     if (json) {
       console.log(JSON.stringify(result, null, 2));
@@ -207,6 +299,28 @@ async function main() {
       console.log(`static taint flows: ${result.summary.static_taint_flow_count || 0}`);
       console.log(`call-graph paths: ${result.summary.call_graph_path_count || 0}`);
       for (const decision of result.mock_decisions.slice(0, 12)) console.log(`- ${decision.decision}: ${decision.surface}/${decision.kind} ${decision.label}`);
+    } else if (surface === 'function' || surface === 'functions') {
+      const functions = Array.isArray(result.functions) ? result.functions : [];
+      const publicFunctions = functions.filter((fn) => fn.visibility === 'public' || fn.visibility === 'exported' || fn.exported === true);
+      const sideEffectful = functions.filter((fn) => fn.purity && fn.purity.classification === 'side_effectful');
+      console.log(`functions: ${functions.length}`);
+      console.log(`public/exported: ${publicFunctions.length}`);
+      console.log(`side-effectful: ${sideEffectful.length}`);
+      console.log(`generated cases: ${Array.isArray(result.generated_cases) ? result.generated_cases.length : 0}`);
+      console.log(`missing obligations: ${Array.isArray(result.missing_obligations) && result.missing_obligations.length ? result.missing_obligations.join(', ') : 'none'}`);
+      for (const fn of publicFunctions.slice(0, 12)) {
+        const purity = fn.purity && fn.purity.classification ? fn.purity.classification : 'unknown';
+        console.log(`- ${fn.visibility} ${fn.language} ${fn.name} (${purity}) ${fn.file}:${fn.line}`);
+      }
+    } else if (surface === 'runtime-lab' || surface === 'lab') {
+      const summary = result.summary || {};
+      console.log(`dev servers: ${summary.dev_server_count || (Array.isArray(result.dev_servers) ? result.dev_servers.length : 0)}`);
+      console.log(`services: ${summary.service_count || (result.orchestration && Array.isArray(result.orchestration.services) ? result.orchestration.services.length : 0)}`);
+      console.log(`readiness checks: ${Array.isArray(result.readiness_checks) ? result.readiness_checks.length : 0}`);
+      console.log(`auth sessions: ${summary.auth_session_count || (Array.isArray(result.auth_session_matrix) ? result.auth_session_matrix.length : 0)}`);
+      console.log(`third-party providers: ${summary.third_party_provider_count || (result.third_party && Array.isArray(result.third_party.providers) ? result.third_party.providers.length : 0)}`);
+      console.log(`blocked actions: ${summary.blocked_action_count || (Array.isArray(result.blocks) ? result.blocks.length : 0)}`);
+      for (const server of (Array.isArray(result.dev_servers) ? result.dev_servers : []).slice(0, 8)) console.log(`- ${server.id}: ${server.lab_command || server.command}`);
     } else if (surface === 'discovery' || surface === 'gaps') {
       printDiscovery(result);
     } else if (surface === 'all') {
@@ -220,6 +334,8 @@ async function main() {
       console.log(`concurrency race tooling: ${result.concurrency.race_tooling.map((tool) => tool.id).join(', ') || 'none detected'}`);
       console.log(`performance tools: ${result.performance.tools.map((tool) => tool.name).join(', ') || 'none detected'}`);
       console.log(`formal categories: ${result.formal.categories.join(', ') || 'none detected'}`);
+      console.log(`functions: ${result.function.functions.length}`);
+      console.log(`runtime lab dev servers: ${(result.runtime_lab.dev_servers || []).length}`);
       console.log(`safety decisions: ${result.safety.summary.safe_count} real-safe, ${result.safety.summary.review_count} review, ${result.safety.summary.mock_count} mock, ${result.safety.summary.block_count} block`);
       const gaps = [...result.cli.gaps, ...result.api.gaps, ...result.frontend.gaps, ...result.state.gaps, ...result.state_machine.gaps, ...result.concurrency.gaps, ...result.performance.gaps, ...result.formal.gaps];
       if (gaps.length > 0) console.log(`gaps: ${gaps.join('; ')}`);

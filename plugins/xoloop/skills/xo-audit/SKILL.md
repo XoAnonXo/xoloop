@@ -22,6 +22,17 @@ finding. All apply through the same test-gated engine bridge as polish.
 - "is this code correct?"
 - "what could go wrong with this?"
 
+## Verify / Discovery gate
+
+For fix mode on behavior-sensitive, stateful, concurrent, public API, or
+safety-relevant code, run `xoloop-verify discover --write --json` before
+fixer subagents mutate files. Select repo-specific suites from detected
+frontend, api, state, function, runtime-lab, performance, formal, cli,
+concurrency, state-machine, and safety surfaces. Fixes should leave
+relevant goals at `PASS_EVIDENCED`; `PASS_WITH_GAPS` requires accepted
+named gaps, and
+`FAIL`/`NO_EVIDENCE` blocks broad auto-fix.
+
 ## How it runs
 
 1. **Initialize or resume the session.** Run

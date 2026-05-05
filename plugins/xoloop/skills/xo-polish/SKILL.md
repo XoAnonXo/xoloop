@@ -27,6 +27,15 @@ User says any of:
 - "optimize this code"
 - "improve the readability of"
 
+## Verify / Discovery gate
+
+Before broad refactors, behavior-sensitive cleanup, or
+optimization-shaped polish, run `xoloop-verify discover --write --json`.
+Select repo-specific suites from the detected frontend, api, state, function, runtime-lab, performance, formal,
+cli, concurrency, state-machine, and safety surfaces. Proceed with risky polish only when the selected goal or suite
+is `PASS_EVIDENCED`; `PASS_WITH_GAPS` requires accepted named gaps, and
+`FAIL`/`NO_EVIDENCE` blocks the mutating loop.
+
 ## How it runs (step-by-step)
 
 1. **Initialize or resume the session.** Use

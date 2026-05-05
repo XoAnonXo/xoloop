@@ -21,6 +21,17 @@ No API key required, no subagents spawned.
 - "create a regression test for this behavior"
 - "how fast is this?"
 
+## Verify / Discovery use
+
+Benchmark is read-only evidence, not a complete safety envelope. Before
+using a benchmark to drive `xo-improve` or `xo-optimise`, run
+`xoloop-verify discover --write --json` and select repo-specific suites
+from detected frontend, api, state, function, runtime-lab, performance, formal, cli,
+concurrency, state-machine, and safety surfaces. Pair `performance-suite`
+with the relevant behavior suite(s); missing oracles stay
+`PASS_WITH_GAPS` until named gaps are accepted, and only
+`PASS_EVIDENCED` should gate risky optimization.
+
 ## How to invoke
 
 ```bash

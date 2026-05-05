@@ -35,6 +35,26 @@ xoloop-verify create --kind discovery-suite --goal-id discovery-suite --force
 xoloop-verify run .xoloop/goals/discovery-suite/goal.yaml --json
 ```
 
+Generate an objective-led suite goal after discovery:
+
+```bash
+xoloop-verify make-goal --objective "make backend cheaper/faster"
+```
+
+Use `make-goal` after discovery has written the repo surfaces. It should
+compose a suite goal from discovered surfaces, objective-specific metric
+analysis, exact obligation chains, generated benchmark harnesses,
+cost/APM/DB/queue/infra signals, accepted gap IDs, agent command
+templates, and the declared tradeoff policy.
+
+Inspect or decide tradeoff proposals from an optimisation run:
+
+```bash
+xoloop-verify tradeoff .xoloop/goals/<id>/goal.yaml --json
+xoloop-verify tradeoff .xoloop/goals/<id>/goal.yaml --accept <tradeoff-id> --reason "approved experiment" --json
+xoloop-verify tradeoff .xoloop/goals/<id>/goal.yaml --reject <tradeoff-id> --reason "keep behavior" --json
+```
+
 Create a conservative frontend verification envelope:
 
 ```bash
@@ -63,6 +83,18 @@ Create a database/state verification envelope:
 ```bash
 xoloop-verify scan --surface state --json
 xoloop-verify create --kind state-suite --goal-id state-suite --force
+```
+
+Inspect public/exported functions as direct input/output obligations:
+
+```bash
+xoloop-verify scan --surface function --json
+```
+
+Inspect the generated whole-app runtime lab plan:
+
+```bash
+xoloop-verify scan --surface runtime-lab --json
 ```
 
 Create a state-machine/workflow verification envelope:
@@ -210,18 +242,24 @@ xoloop-verify card .xoloop/goals/<id>/goal.yaml --json
   diffs, built-in Playwright capture, and replayable counterexamples.
 - `discovery-suite`: repo-wide observable-surface inventory and gap gate.
   It scans frontend, API, state, workflows, concurrency, performance,
-  formal/static, CLI, and safety surfaces; crawls CI, deployment/IaC, runtime
-  services/queues, mobile/native shells, monorepo package graphs, and
-  coarse dataflow paths; records automatically verifiable areas; names
-  uncovered risky gaps with semantic severity and mapped suite
-  obligations; classifies safe clicks/actions, destructive operations,
-  sensitive data flows, third-party side effects, and mock-vs-real
-  execution decisions; reads `.xoloop/safety-policy.json` or YAML for
-  org-specific policy; ingests prior frontend runtime traces; extracts
-  schema-aware PII/secret signals; builds static taint flows and
-  UI/runtime → API → state/third-party call graph paths; generates mock,
-  VCR, sandbox, redaction, and runtime-crawl assets; suggests multi-step
-  harness remediation; writes
+  formal/static, CLI, function, runtime-lab, and safety surfaces; crawls CI,
+  deployment/IaC, runtime services/queues, mobile/native shells, monorepo
+  package graphs, and coarse dataflow paths; records automatically
+  verifiable areas; names uncovered risky gaps with semantic severity and
+  mapped suite obligations; inventories public/exported JS/TS/Python/Go/Rust
+  functions with signatures, examples, purity/side-effect classification,
+  missing oracle/property/fuzz/differential obligations, generated cases, and
+  harness suggestions; plans an isolated runtime lab with dev servers,
+  docker/devcontainer orchestration, readiness checks, env templates,
+  seed/reset hooks, auth/session/tenant fixtures, third-party mock/VCR
+  routing, and blocked sensitive/destructive actions; classifies safe
+  clicks/actions, destructive operations, sensitive data flows, third-party
+  side effects, and mock-vs-real execution decisions; reads
+  `.xoloop/safety-policy.json` or YAML for org-specific policy; ingests prior
+  frontend runtime traces; extracts schema-aware PII/secret signals; builds
+  static taint flows and UI/runtime → API → state/third-party call graph
+  paths; generates mock, VCR, sandbox, redaction, runtime-crawl, and
+  runtime-lab assets; suggests multi-step harness remediation; writes
   `.xoloop/discovery.json`; and blocks optimization until blocking gaps are
   covered by the specific required obligations or explicitly accepted by ID.
 - `suite`: orchestration envelope that combines child goals under
@@ -249,8 +287,33 @@ use Verify as the safety envelope before aggressive implementation work:
    external standard tool.
 6. Add command-suite obligations for repo tests, type checks, static
    analyzers, model checkers, symbolic execution, or proof tools.
-7. Run the goal and report the card. Start optimization only after
+7. For broad objectives, run `xoloop-verify make-goal --objective
+   "<objective>"` to turn discovery surfaces, metrics, accepted gaps, and
+   tradeoff policy into the suite goal optimization agents will consume.
+8. Run the goal and report the card. Start optimization only after
    `PASS_EVIDENCED`, unless the user explicitly accepts named gaps.
+
+`make-goal` is not permission to change behavior for savings. If a cheaper
+or faster path requires weaker semantics, different defaults, degraded
+quality, reduced retention, skipped work, or changed external effects, record
+it as a proposal under the goal's tradeoff policy and ask for user acceptance
+before implementation.
+
+Generated `make-goal` directories include:
+
+- `metric-analysis.json`: objective keywords, selected gate metrics, cost
+  proxies, and bottleneck metric sources.
+- `obligation-chains.json`: exact screen/API/function/state paths tying
+  the objective to verification obligations and replayable surfaces.
+- `cost-model.json`: cloud billing, APM, DB query, queue, and infra signals
+  plus env inputs such as `XOLOOP_MONTHLY_COST_USD`,
+  `XOLOOP_DB_QUERY_MS`, and `XOLOOP_QUEUE_JOB_MS`.
+- `harnesses/performance/goal-benchmark.cjs`: generated benchmark wrapper
+  for URL, command, and cost/APM/DB/queue inputs when no bespoke benchmark
+  exists.
+- `agents/`: Codex and Claude Code optimiser command wrappers plus the
+  JSON output schema they must satisfy.
+- `tradeoffs.json`: decision ledger written by `xoloop-verify tradeoff`.
 
 For visual/chart work, do not rely on text I/O alone. The intended future
 shape is the `frontend-suite` verifier: launch Playwright, capture real
@@ -287,6 +350,22 @@ or savepoint commands, and generate tenant matrices for multi-tenant data.
 Missing adapters, orchestration, snapshots, redactions, migrations,
 rollback, fixtures, query logs, invariants, tenant isolation, budgets, or
 write-boundary declarations must stay visible as `PASS_WITH_GAPS`.
+
+For function-level work, use `xoloop-verify scan --surface function` to
+inventory every public/exported function the scanner can see. Pure functions
+should grow explicit example oracles, property checks, fuzz cases, and
+differential/reference checks before rewrite. Side-effectful functions need
+filesystem/network/process/time/state/logging contracts and replayable effect
+snapshots. Missing function obligations are discovery gaps, not permission to
+guess.
+
+For whole-app work, use the runtime-lab output from discovery. The lab should
+boot local frontend/API servers when safe commands exist, start DB/container
+dependencies when declared, provide deterministic env/session/tenant fixtures,
+run seed/reset hooks, and route destructive or third-party behavior through
+mocks, VCR, or blocked-action files. Generated `.xoloop/goals/<id>/runtime-lab`
+assets are part of the verification cage agents should use before fullstack
+experiments.
 
 For workflow/state-machine work, prefer `state-machine-suite`. Cases
 should declare an initial state, command/event sequence, transition model,

@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 
 const {
@@ -12,7 +13,9 @@ const {
   runGoalVerify,
 } = require('../lib/goal_verify_runner.cjs');
 const { artifactHash, loadGoalManifest, writeGoalManifest } = require('../lib/goal_manifest.cjs');
+const { runCliCommand } = require('../lib/goal_cli_runner.cjs');
 const { runOptimiseLoop } = require('../lib/goal_optimise_runner.cjs');
+const { countBranchTokens } = require('../lib/goal_complexity.cjs');
 
 const repoRoot = path.resolve(__dirname, '..', '..', '..');
 const exampleCanon = path.resolve(__dirname, '..', 'examples', 'json-canonicalizer', 'src', 'canon.cjs');
@@ -199,6 +202,76 @@ test('optimise rejects operations outside allowed artifact paths', async () => {
   assert.equal(fs.existsSync(path.join(cwd, 'outside.cjs')), false);
 });
 
+test('optimise records proposal-only tradeoffs without mutating files', async () => {
+  const cwd = tmpDir();
+  copyExampleTarget(cwd);
+  const goalPath = createFastGoal(cwd);
+  await runGoalVerify(goalPath, { cwd });
+  const before = fs.readFileSync(path.join(cwd, 'src', 'canon.cjs'), 'utf8');
+  const agentCommand = writeAgent(cwd, 'tradeoff-agent.cjs', [
+    '#!/usr/bin/env node',
+    'process.stdout.write(JSON.stringify({',
+    "  summary: 'cost savings require dropping duplicate-key rejection',",
+    '  operations: [],',
+    '  tradeoffs: [{',
+    "    id: 'drop-duplicate-key-detection',",
+    "    description: 'Skip duplicate-key detection to reduce parser work',",
+    "    estimated_savings: '5-10% CPU on pathological JSON payloads',",
+    "    behavior_change: 'duplicate keys would no longer be rejected',",
+    "    verification_impact: 'reject-duplicate-key baseline must be explicitly changed',",
+    '    requires_user_approval: true',
+    '  }],',
+    "  notes: ['Kept as proposal only because it changes behavior.']",
+    '}));',
+    '',
+  ].join('\n'));
+
+  const summary = await runOptimiseLoop({ cwd, goalPath, agentCommand, rounds: 1 });
+  const after = fs.readFileSync(path.join(cwd, 'src', 'canon.cjs'), 'utf8');
+
+  assert.equal(summary.stop_reason, 'agent_tradeoff_only');
+  assert.equal(summary.noops, 1);
+  assert.equal(summary.tradeoffs[0].id, 'drop-duplicate-key-detection');
+  assert.match(summary.notes[0].note, /proposal only/);
+  assert.equal(after, before);
+});
+
+test('xoloop-verify tradeoff accepts recorded tradeoff proposals', async () => {
+  const cwd = tmpDir();
+  copyExampleTarget(cwd);
+  const goalPath = createFastGoal(cwd);
+  await runGoalVerify(goalPath, { cwd });
+  const agentCommand = writeAgent(cwd, 'tradeoff-agent.cjs', [
+    '#!/usr/bin/env node',
+    'process.stdout.write(JSON.stringify({',
+    "  summary: 'proposal only',",
+    '  operations: [],',
+    '  tradeoffs: [{',
+    "    id: 'drop-duplicate-key-detection',",
+    "    description: 'Skip duplicate-key detection',",
+    "    estimated_savings: '5% CPU',",
+    "    behavior_change: 'duplicate keys accepted',",
+    "    verification_impact: 'baseline update required'",
+    '  }]',
+    '}));',
+    '',
+  ].join('\n'));
+  await runOptimiseLoop({ cwd, goalPath, agentCommand, rounds: 1 });
+  const cliPath = path.resolve(__dirname, '..', 'bin', 'xoloop-verify.cjs');
+
+  const listed = spawnSync(process.execPath, [cliPath, 'tradeoff', goalPath, '--json'], { cwd, encoding: 'utf8' });
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.equal(JSON.parse(listed.stdout).tradeoffs[0].id, 'drop-duplicate-key-detection');
+
+  const accepted = spawnSync(process.execPath, [cliPath, 'tradeoff', goalPath, '--accept', 'drop-duplicate-key-detection', '--reason', 'approved experiment', '--json'], { cwd, encoding: 'utf8' });
+  assert.equal(accepted.status, 0, accepted.stderr);
+  const payload = JSON.parse(accepted.stdout);
+  assert.equal(payload.decision, 'accepted');
+  assert.ok(payload.goal.acceptance.accepted_tradeoffs.includes('drop-duplicate-key-detection'));
+  const ledger = JSON.parse(fs.readFileSync(path.join(cwd, '.xoloop', 'goals', 'json-canon-test', 'tradeoffs.json'), 'utf8'));
+  assert.equal(ledger.decisions['drop-duplicate-key-detection'].decision, 'accepted');
+});
+
 test('command-suite goals verify named CLI obligations', async () => {
   const cwd = tmpDir();
   fs.writeFileSync(path.join(cwd, 'ok.cjs'), "console.log('ready');\n", 'utf8');
@@ -238,6 +311,16 @@ test('command-suite goals verify named CLI obligations', async () => {
 
   assert.equal(card.verdict, 'PASS_EVIDENCED');
   assert.deepEqual(card.missing_obligations, []);
+});
+
+test('runCliCommand keeps verifier Node first on PATH for generated commands', async () => {
+  const result = await runCliCommand('node -p "process.execPath"', '', {
+    cwd: tmpDir(),
+    timeoutMs: 5000,
+  });
+
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.equal(result.stdout.trim(), process.execPath);
 });
 
 test('general-io goals verify black-box CLI cases and properties', async () => {
@@ -382,4 +465,15 @@ test('artifact hash covers verifier-owned inputs that affect verdicts', () => {
   assertHashChanges('accepted-gaps.json', '["frontend:baseline-missing"]\n');
   assertHashChanges('discovery.json', '{"blocking_gaps":[{"id":"api:missing"}]}\n');
   assertHashChanges('invariants.json', '[{"id":"total","rule":"changed"}]\n');
+});
+
+test('complexity branch counting is linear for large generated template strings', () => {
+  const template = `const text = \`${'if (x) { return y; } '.repeat(20000)}\`;`;
+  const source = `${template}\nif (ready && enabled) { for (const item of items) console.log(item); }\n`;
+  const started = Date.now();
+  const branches = countBranchTokens(source);
+  const elapsed = Date.now() - started;
+
+  assert.equal(branches, 3);
+  assert.ok(elapsed < 500, `branch counting should stay fast, got ${elapsed}ms`);
 });

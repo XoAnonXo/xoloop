@@ -30,6 +30,17 @@ timeouts.
 
 For a single mode, route to the specific skill instead.
 
+## Verify / Discovery gate
+
+Start every overnight run with `xoloop-verify discover --write --json`
+and create/run the repo-specific suite mix for detected frontend, api,
+state, function, runtime-lab, performance, formal, cli, concurrency,
+state-machine, and safety surfaces. The mutating phases (simplify, polish,
+improve, autoresearch, audit, and docs touching source docblocks) require
+`PASS_EVIDENCED` for their relevant goals. `PASS_WITH_GAPS` is allowed
+only when the user accepts named gaps; unaccepted gaps, `FAIL`, or
+`NO_EVIDENCE` skip the risky phase instead of spending overnight budget.
+
 ## The 11-phase pipeline
 
 Runs phases in order, per surface. Default rounds chosen from experience

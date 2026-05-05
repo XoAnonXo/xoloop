@@ -85,8 +85,10 @@ const {
 const {
   DEFAULT_DISCOVERY_OBLIGATIONS,
   buildDiscoverySuiteGoal,
+  buildRuntimeLabPlan,
   discoverRepo,
   runDiscoverySuiteVerification,
+  scanFunctionRepo,
   writeDiscoverySuiteAssets,
 } = require('./goal_discovery.cjs');
 
@@ -865,7 +867,9 @@ module.exports = {
   discoverRepo,
   scanPerformanceRepo,
   scanFormalRepo,
+  scanFunctionRepo,
   scanFrontendRepo,
+  buildRuntimeLabPlan,
   scanStateMachineRepo,
   scanStateRepo,
   summarizeVerificationStatuses,
